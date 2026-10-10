@@ -4,9 +4,11 @@ import {
   buildWhatsAppTemplatePayload,
   buildWhatsAppTextPayload,
   getTemplateBodyParameterCount,
+  getWhatsAppTemplateRequirements,
   isInsideCustomerServiceWindow,
   normalizeE164Phone,
   parseTemplateBodyParameters,
+  parseWhatsAppTemplateInput,
 } from "./whatsapp-shared.ts";
 
 const shop = `whatsapp-smoke-${randomUUID().replaceAll("-", "")}.myshopify.com`;
@@ -25,6 +27,7 @@ process.env.META_APP_SECRET = appSecret;
 process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN = verificationToken;
 process.env.WHATSAPP_TEST_RECIPIENT_PHONE = recipient;
 process.env.WHATSAPP_TEST_SENDING_ENABLED = "false";
+process.env.WHATSAPP_INBOX_SENDING_ENABLED = "false";
 process.env.WHATSAPP_LIVE_SENDING_ENABLED = "false";
 
 const [{ loader, action }, { default: prisma }, whatsappServer] =
@@ -35,6 +38,7 @@ const [{ loader, action }, { default: prisma }, whatsappServer] =
   ]);
 const {
   getConfiguredWhatsAppShop,
+  isWhatsAppInboxSendingEnabled,
   isWhatsAppWebhookConfigurationComplete,
 } = whatsappServer;
 
@@ -93,6 +97,14 @@ const check = (name, fn) =>
     .then(() => checked.push(name));
 
 try {
+  await check("general Inbox sending remains explicitly opt-in", () => {
+    assert.equal(isWhatsAppInboxSendingEnabled(), false);
+    process.env.WHATSAPP_INBOX_SENDING_ENABLED = "true";
+    assert.equal(isWhatsAppInboxSendingEnabled(), true);
+    process.env.WHATSAPP_INBOX_SENDING_ENABLED = "false";
+    assert.equal(isWhatsAppInboxSendingEnabled(), false);
+  });
+
   const templateComponents = JSON.stringify([
     { type: "BODY", text: "Hi {{1}}, your order {{2}} is ready." },
   ]);
@@ -126,7 +138,15 @@ try {
         recipient,
         "order_update",
         "en_US",
-        ["Ari", "order-42"],
+        [
+          {
+            type: "body",
+            parameters: [
+              { type: "text", text: "Ari" },
+              { type: "text", text: "order-42" },
+            ],
+          },
+        ],
       ),
       {
         messaging_product: "whatsapp",
@@ -149,12 +169,123 @@ try {
     );
     assert.throws(
       () => parseTemplateBodyParameters('["Ari"]', templateComponents),
-      /requires 2 body parameters/,
+      /requires 2 non-empty body parameters/,
     );
     assert.throws(
       () => parseTemplateBodyParameters('{"name":"Ari"}', templateComponents),
       /JSON string array/,
     );
+  });
+
+  await check("template text/media headers and dynamic URL button parameters", () => {
+    const textHeaderDefinition = JSON.stringify([
+      { type: "HEADER", format: "TEXT", text: "Hi {{name}}" },
+      { type: "BODY", text: "Your order {{1}} is ready." },
+      { type: "FOOTER", text: "Bowchika" },
+      {
+        type: "BUTTONS",
+        buttons: [
+          { type: "URL", text: "Track order", url: "https://bowchika.in/track/{{1}}" },
+          { type: "QUICK_REPLY", text: "Contact us" },
+        ],
+      },
+    ]);
+    const parsedTextHeader = parseWhatsAppTemplateInput(
+      JSON.stringify({
+        header: { format: "TEXT", values: ["Ari"] },
+        body: ["order 42"],
+        buttons: { "0": ["order-42"] },
+      }),
+      textHeaderDefinition,
+    );
+    assert.deepEqual(parsedTextHeader.components, [
+      {
+        type: "header",
+        parameters: [{ type: "text", text: "Ari", parameter_name: "name" }],
+      },
+      { type: "body", parameters: [{ type: "text", text: "order 42" }] },
+      {
+        type: "button",
+        sub_type: "url",
+        index: "0",
+        parameters: [{ type: "text", text: "order-42" }],
+      },
+    ]);
+    assert.match(parsedTextHeader.preview, /Hi Ari/);
+    assert.match(parsedTextHeader.preview, /Bowchika/);
+    assert.match(parsedTextHeader.preview, /https:\/\/bowchika\.in\/track\/order-42/);
+
+    const imageDefinition = JSON.stringify([
+      { type: "HEADER", format: "IMAGE", example: { header_handle: ["media"] } },
+      { type: "BODY", text: "Look at this." },
+    ]);
+    const imageByUrl = parseWhatsAppTemplateInput(
+      JSON.stringify({
+        header: { format: "IMAGE", mediaType: "url", value: "https://cdn.example.test/image.jpg" },
+      }),
+      imageDefinition,
+    );
+    assert.deepEqual(imageByUrl.components[0], {
+      type: "header",
+      parameters: [
+        { type: "image", image: { link: "https://cdn.example.test/image.jpg" } },
+      ],
+    });
+    const imageById = parseWhatsAppTemplateInput(
+      JSON.stringify({
+        header: { format: "IMAGE", mediaType: "id", value: "123456789012345" },
+      }),
+      imageDefinition,
+    );
+    assert.deepEqual(imageById.components[0], {
+      type: "header",
+      parameters: [
+        { type: "image", image: { id: "123456789012345" } },
+      ],
+    });
+    assert.throws(
+      () =>
+        parseWhatsAppTemplateInput(
+          JSON.stringify({
+            header: { format: "IMAGE", mediaType: "url", value: "http://cdn.example.test/image.jpg" },
+          }),
+          imageDefinition,
+        ),
+      /must use HTTPS/,
+    );
+    assert.throws(
+      () =>
+        parseWhatsAppTemplateInput(
+          JSON.stringify({
+            header: { format: "IMAGE", mediaType: "id", value: "not-a-media-id" },
+          }),
+          imageDefinition,
+        ),
+      /numeric WhatsApp media ID/,
+    );
+    assert.equal(
+      getWhatsAppTemplateRequirements(
+        JSON.stringify([{ type: "HEADER", format: "VIDEO" }]),
+      ).unsupported,
+      "The VIDEO header type is not supported for sending.",
+    );
+    assert.throws(
+      () =>
+        parseWhatsAppTemplateInput(
+          JSON.stringify({
+            header: { format: "TEXT", values: ["Ari"] },
+            body: ["order 42"],
+            buttons: { "0": [""] },
+          }),
+          textHeaderDefinition,
+        ),
+      /must be non-empty/,
+    );
+    assert.throws(
+      () => parseWhatsAppTemplateInput("{}", textHeaderDefinition),
+      /Text header requires exactly 1 parameter/,
+    );
+    assert.equal(normalizeE164Phone("555-123"), null);
   });
 
   await check("shop binding normalization without development-store fallback", () => {
@@ -394,7 +525,13 @@ try {
             recipient,
             "order_update",
             "en_US",
-            ["Ari", "order-42"],
+            [{
+              type: "body",
+              parameters: [
+                { type: "text", text: "Ari" },
+                { type: "text", text: "order-42" },
+              ],
+            }],
           ),
         ),
         (error) => {
@@ -415,7 +552,13 @@ try {
           recipient,
           "order_update",
           "en_US",
-          ["Ari", "order-42"],
+          [{
+            type: "body",
+            parameters: [
+              { type: "text", text: "Ari" },
+              { type: "text", text: "order-42" },
+            ],
+          }],
         ),
       );
 
@@ -437,6 +580,86 @@ try {
       );
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  await check("failed send persistence, conversation creation, and duplicate prevention", async () => {
+    const phoneNumber = "+447700900123";
+    const clientRequestId = randomUUID();
+    let fetchCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetchCount += 1;
+      return new Response(
+        JSON.stringify({ error: { code: 132001 } }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    };
+    try {
+      const result = await whatsappServer.sendAndPersistWhatsAppMessage(
+        prisma,
+        {
+          phoneNumberId,
+          accessToken: "local-only-not-a-real-access-token",
+          apiVersion: "v23.0",
+        },
+        buildWhatsAppTemplatePayload(
+          phoneNumber,
+          "order_update",
+          "en_US",
+          [],
+        ),
+        {
+          shop,
+          phoneNumber,
+          clientRequestId,
+          type: "TEMPLATE",
+          text: "Local test template, not delivered.",
+        },
+      );
+      assert.equal(result.error?.code, 132001);
+      assert.equal(fetchCount, 1);
+      const conversation = await prisma.whatsAppConversation.findUnique({
+        where: { shop_phoneNumber: { shop, phoneNumber } },
+      });
+      assert.ok(conversation);
+      assert.equal(conversation.isDemo, false);
+      const message = await prisma.whatsAppMessage.findUnique({
+        where: { id: result.pendingMessage.messageId },
+      });
+      assert.equal(message?.conversationId, conversation.id);
+      assert.equal(message?.status, "FAILED");
+
+      await assert.rejects(
+        whatsappServer.sendAndPersistWhatsAppMessage(
+          prisma,
+          {
+            phoneNumberId,
+            accessToken: "local-only-not-a-real-access-token",
+            apiVersion: "v23.0",
+          },
+          buildWhatsAppTemplatePayload(
+            phoneNumber,
+            "order_update",
+            "en_US",
+            [],
+          ),
+          {
+            shop,
+            phoneNumber,
+            clientRequestId,
+            type: "TEMPLATE",
+            text: "Duplicate must not call the mocked API.",
+          },
+        ),
+        (error) => error?.code === "P2002",
+      );
+      assert.equal(fetchCount, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await prisma.whatsAppConversation.deleteMany({
+        where: { shop, phoneNumber },
+      });
     }
   });
 

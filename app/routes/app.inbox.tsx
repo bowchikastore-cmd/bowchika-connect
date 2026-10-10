@@ -1,7 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Link, useFetcher, useLoaderData, useRevalidator } from "react-router";
+import {
+  Link,
+  useFetcher,
+  useLoaderData,
+  useNavigate,
+  useRevalidator,
+} from "react-router";
 import { Prisma } from "@prisma/client";
+import type { WhatsAppConversation } from "@prisma/client";
+import { createPortal } from "react-dom";
+import type {
+  WhatsAppTemplateInput,
+  WhatsAppTemplateRequirements,
+} from "../whatsapp-shared";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 import {
@@ -9,17 +21,19 @@ import {
   buildWhatsAppTemplatePayload,
   buildWhatsAppTextPayload,
   getTemplateBodyParameterCount,
+  getWhatsAppTemplateRequirements,
   normalizeE164Phone,
-  parseTemplateBodyParameters,
+  parseWhatsAppTemplateInput,
 } from "../whatsapp-shared";
 import {
   getConfiguredWhatsAppShop,
   getWhatsAppConfig,
+  sendAndPersistWhatsAppMessage,
+  WhatsAppDemoConversationError,
   getWhatsAppTestRecipient,
+  isWhatsAppInboxSendingEnabled,
   isWhatsAppTestSendingEnabled,
   isWhatsAppWebhookConfigurationComplete,
-  recordWhatsAppMessageAccepted,
-  sendWhatsAppApiRequest,
   whatsAppApiErrorMessage,
   WhatsAppConfigurationError,
 } from "../whatsapp.server";
@@ -31,6 +45,7 @@ type InboxActionData = {
   error?: string;
   success?: string;
   messageId?: string;
+  conversationId?: string;
 };
 
 const formText = (formData: FormData, key: string) =>
@@ -138,14 +153,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     conversations,
     selectedConversation,
     messages,
-    approvedTemplates: approvedTemplates.map(({ components, ...template }) => {
+    approvedTemplates: approvedTemplates.map((template) => {
       try {
         return {
           ...template,
-          bodyParameterCount: getTemplateBodyParameterCount(components),
+          requirements: getWhatsAppTemplateRequirements(template.components),
+          bodyParameterCount: getTemplateBodyParameterCount(template.components),
+          componentError: null,
         };
       } catch {
-        return { ...template, bodyParameterCount: null };
+        return {
+          ...template,
+          requirements: null,
+          bodyParameterCount: null,
+          componentError: "Template definition is invalid; sync templates again.",
+        };
       }
     }),
     testRecipientPhone,
@@ -156,6 +178,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     webhookVerified,
     testSendingOptIn: isWhatsAppTestSendingEnabled(),
     testSendingReady,
+    inboxSendingOptIn: isWhatsAppInboxSendingEnabled(),
+    inboxSendingReady:
+      isWhatsAppInboxSendingEnabled() &&
+      isWhatsAppWebhookConfigurationComplete() &&
+      metaConfigured &&
+      tenantBound &&
+      webhookVerified,
     activeShopDomain,
     configuredShopDomain,
     tenantBound,
@@ -265,19 +294,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return json({ success: "Sample conversation is ready. No WhatsApp messages were sent." });
   }
 
-  if (intent !== "send-reply" && intent !== "send-template") {
+  if (
+    intent !== "send-reply" &&
+    intent !== "send-template" &&
+    intent !== "start-new-chat"
+  ) {
     return json({ error: "Unsupported inbox action." }, 400);
   }
 
-  const conversationId = formText(formData, "conversationId");
-  if (!conversationId) return json({ error: "Choose a conversation first." }, 400);
-  const conversation = await prisma.whatsAppConversation.findFirst({
-    where: { id: conversationId, shop: session.shop },
-  });
-  if (!conversation) {
-    return json({ error: "That conversation was not found for this shop." }, 404);
-  }
-
+  const isStartNewChat = intent === "start-new-chat";
+  const isTemplate = intent !== "send-reply";
+  let recipientPhone: string;
+  let conversation: WhatsAppConversation | null = null;
   let template: {
     name: string;
     language: string;
@@ -285,23 +313,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     components: string;
   } | null =
     null;
-  let templateParameters: string[] = [];
+  let templateInput: ReturnType<typeof parseWhatsAppTemplateInput> | null = null;
   let text = "";
-  if (intent === "send-reply") {
-    text = formText(formData, "text");
-    if (!text || text.length > 4096) {
-      return json({ error: "Enter a reply between 1 and 4,096 characters." }, 400);
-    }
-    if (
-      !conversation.isDemo &&
-      !isInsideCustomerServiceWindow(conversation.lastInboundAt)
-    ) {
+  if (isStartNewChat) {
+    const rawRecipient = formText(formData, "recipientPhone");
+    const normalizedRecipient = normalizeE164Phone(rawRecipient);
+    if (!rawRecipient.startsWith("+") || !normalizedRecipient) {
       return json(
-        { error: "The 24-hour customer-service window has closed. Send an approved template instead." },
+        { error: "Enter a valid international phone number beginning with +." },
         400,
       );
     }
+    recipientPhone = normalizedRecipient;
   } else {
+    const conversationId = formText(formData, "conversationId");
+    if (!conversationId) {
+      return json({ error: "Choose a conversation first." }, 400);
+    }
+    const foundConversation = await prisma.whatsAppConversation.findFirst({
+      where: { id: conversationId, shop: session.shop },
+    });
+    if (!foundConversation) {
+      return json({ error: "That conversation was not found for this shop." }, 404);
+    }
+    conversation = foundConversation;
+    recipientPhone = foundConversation.phoneNumber;
+  }
+
+  if (isTemplate) {
     const templateId = formText(formData, "templateId");
     if (!templateId) return json({ error: "Choose an approved template." }, 400);
     template = await prisma.approvedWhatsAppTemplate.findFirst({
@@ -317,109 +356,98 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return json({ error: "Choose an approved template synced for this shop." }, 400);
     }
     try {
-      templateParameters = parseTemplateBodyParameters(
-        formText(formData, "templateParameters"),
+      templateInput = parseWhatsAppTemplateInput(
+        formText(formData, "templateInput"),
         template.components,
       );
     } catch (error) {
       return json(
-        { error: error instanceof Error ? error.message : "Invalid template parameters." },
+        { error: error instanceof Error ? error.message : "Invalid template inputs." },
         400,
       );
     }
-    text = `Template: ${template.name}${templateParameters.length ? ` · ${templateParameters.join(", ")}` : ""}`;
-  }
-
-  if (conversation.isDemo) {
-    const message = await prisma.$transaction(async (transaction) => {
-      const created = await transaction.whatsAppMessage.create({
-        data: {
-          conversationId: conversation.id,
-          shop: session.shop,
-          direction: "OUTBOUND",
-          type: intent === "send-template" ? "TEMPLATE" : "TEXT",
-          text,
-          status: "DEMO",
+    text = `Template: ${template.name} · ${template.language}${
+      templateInput.preview ? `\n${templateInput.preview}` : ""
+    }`;
+    if (
+      !isStartNewChat &&
+      conversation?.isDemo
+    ) {
+      // Keep template preview available in the local sample conversation.
+    } else if (formText(formData, "confirmRecipientOptIn") !== "yes") {
+      return json(
+        {
+          error:
+            "Confirm that this recipient explicitly opted in to receive WhatsApp messages from this business.",
         },
-        select: { id: true },
-      });
-      await transaction.whatsAppConversation.update({
-        where: { id: conversation.id },
-        data: { lastMessageAt: new Date() },
-      });
-      return created;
-    });
-    return json({
-      success: "Demo reply saved locally. No WhatsApp messages were sent.",
-      messageId: message.id,
-    });
+        400,
+      );
+    }
+  } else {
+    text = formText(formData, "text");
+    if (!text || text.length > 4096) {
+      return json({ error: "Enter a reply between 1 and 4,096 characters." }, 400);
+    }
+    if (
+      conversation &&
+      !conversation.isDemo &&
+      !isInsideCustomerServiceWindow(conversation.lastInboundAt)
+    ) {
+      return json(
+        { error: "The 24-hour customer-service window has closed. Send an approved template instead." },
+        400,
+      );
+    }
   }
 
+  const clientRequestId = formText(formData, "clientRequestId");
   if (
-    intent === "send-template" &&
-    template?.category.toUpperCase() === "MARKETING" &&
-    formText(formData, "confirmMarketingOptIn") !== "yes"
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      clientRequestId,
+    )
   ) {
     return json(
-      { error: "Confirm that this test recipient explicitly opted in to receive WhatsApp marketing messages." },
+      { error: "Refresh the Inbox and retry; the send request identifier is invalid." },
       400,
     );
   }
 
-  const normalizedRecipient = normalizeE164Phone(
-    formText(formData, "testRecipientPhone"),
-  );
-  const configuredRecipient = getWhatsAppTestRecipient();
-  const testConversation = configuredRecipient
-    ? await prisma.whatsAppConversation.findUnique({
-        where: {
-          shop_phoneNumber: {
+  if (conversation?.isDemo && !isStartNewChat) {
+    try {
+      const message = await prisma.$transaction(async (transaction) => {
+        const created = await transaction.whatsAppMessage.create({
+          data: {
+            conversationId: conversation!.id,
             shop: session.shop,
-            phoneNumber: configuredRecipient,
+            direction: "OUTBOUND",
+            type: isTemplate ? "TEMPLATE" : "TEXT",
+            text,
+            status: "DEMO",
+            clientRequestId,
           },
-        },
-      })
-    : null;
-  if (
-    !isWhatsAppTestSendingEnabled() ||
-    !isWhatsAppWebhookConfigurationComplete() ||
-    getConfiguredWhatsAppShop() !== session.shop ||
-    normalizedRecipient !== configuredRecipient ||
-    !testConversation ||
-    testConversation.id !== conversation.id ||
-    testConversation.isDemo ||
-    !testConversation.lastInboundAt
-  ) {
-    return json(
-      { error: "Test sending is locked. Configure the single test recipient and shop, verify Meta's webhook, then receive a real inbound message from that recipient." },
-      403,
-    );
-  }
-  if (!configuredRecipient) {
-    return json({ error: "A valid allow-listed test recipient is not configured." }, 403);
-  }
-  const verifiedWebhook = await prisma.whatsAppWebhookVerification.findFirst({
-    where: {
-      shop: session.shop,
-      phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() ?? "",
-    },
-    select: { shop: true },
-  });
-  if (!verifiedWebhook) {
-    return json(
-      { error: "Meta webhook verification is not recorded for this shop and phone number yet." },
-      403,
-    );
+          select: { id: true },
+        });
+        await transaction.whatsAppConversation.update({
+          where: { id: conversation!.id },
+          data: { lastMessageAt: new Date() },
+        });
+        return created;
+      });
+      return json({
+        success: "Demo message saved locally. No WhatsApp messages were sent.",
+        messageId: message.id,
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return json({ error: "This send request was already recorded." }, 409);
+      }
+      throw error;
+    }
   }
 
-  if (
-    intent === "send-reply" &&
-    !isInsideCustomerServiceWindow(testConversation.lastInboundAt)
-  ) {
-    return json(
-      { error: "The 24-hour customer-service window has closed. Send an approved template instead." },
-      400,
-    );
+  const inboxSending = isWhatsAppInboxSendingEnabled();
+  if (isStartNewChat && !inboxSending) {
+    return json({ error: "Starting new chats is disabled for live sending." }, 403);
   }
 
   let config;
@@ -429,54 +457,103 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return json({ error: whatsAppApiErrorMessage(error) }, 503);
   }
 
-  const messageType = intent === "send-template" ? "TEMPLATE" : "TEXT";
-  const recipientPhone = configuredRecipient;
+  if (
+    !isWhatsAppWebhookConfigurationComplete() ||
+    getConfiguredWhatsAppShop() !== session.shop
+  ) {
+    return json(
+      { error: "WhatsApp sending is blocked until this shop and Cloud API configuration are verified." },
+      403,
+    );
+  }
+  const webhookPhoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() ?? "";
+  const verifiedWebhook = webhookPhoneNumberId
+    ? await prisma.whatsAppWebhookVerification.findFirst({
+        where: { shop: session.shop, phoneNumberId: webhookPhoneNumberId },
+        select: { shop: true },
+      })
+    : null;
+  if (!verifiedWebhook) {
+    return json(
+      { error: "Meta webhook verification is not recorded for this shop and phone number yet." },
+      403,
+    );
+  }
+
+  if (!inboxSending) {
+    const configuredRecipient = getWhatsAppTestRecipient();
+    const normalizedRecipient = normalizeE164Phone(
+      formText(formData, "testRecipientPhone"),
+    );
+    const testConversation = configuredRecipient
+      ? await prisma.whatsAppConversation.findUnique({
+          where: {
+            shop_phoneNumber: {
+              shop: session.shop,
+              phoneNumber: configuredRecipient,
+            },
+          },
+        })
+      : null;
+    if (
+      !isWhatsAppTestSendingEnabled() ||
+      normalizedRecipient !== configuredRecipient ||
+      !testConversation ||
+      !conversation ||
+      testConversation.id !== conversation.id ||
+      testConversation.isDemo ||
+      !testConversation.lastInboundAt
+    ) {
+      return json(
+        {
+          error:
+            "Test sending is locked. Configure the allow-listed phone, verify Meta's webhook, and receive a real inbound message from that phone.",
+        },
+        403,
+      );
+    }
+    if (
+      !isTemplate &&
+      !isInsideCustomerServiceWindow(testConversation.lastInboundAt)
+    ) {
+      return json(
+        { error: "The 24-hour customer-service window has closed. Send an approved template instead." },
+        400,
+      );
+    }
+  }
+
+  const messageType = isTemplate ? "TEMPLATE" : "TEXT";
   let payload: Record<string, unknown>;
-  if (intent === "send-reply") {
+  if (!isTemplate) {
     payload = buildWhatsAppTextPayload(recipientPhone, text);
   } else {
-    if (!template) {
+    if (!template || !templateInput) {
       return json({ error: "Choose an approved template for this shop." }, 400);
     }
     payload = buildWhatsAppTemplatePayload(
       recipientPhone,
       template.name,
       template.language,
-      templateParameters,
+      templateInput.components,
     );
   }
-  const clientRequestId = formText(formData, "clientRequestId");
-  if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      clientRequestId,
-    )
-  ) {
-    return json({ error: "Refresh the Inbox and retry; the send request identifier is invalid." }, 400);
-  }
-  const webhookPhoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() ?? "";
-  if (
-    !webhookPhoneNumberId ||
-    !(await prisma.whatsAppWebhookVerification.findFirst({
-      where: { shop: session.shop, phoneNumberId: webhookPhoneNumberId },
-      select: { shop: true },
-    }))
-  ) {
-    return json({ error: "Meta webhook verification is not recorded for this shop and phone number yet." }, 403);
-  }
-  let pendingMessage;
+
+  let sendResult;
   try {
-    pendingMessage = await prisma.whatsAppMessage.create({
-      data: {
-        conversationId: conversation.id,
+    sendResult = await sendAndPersistWhatsAppMessage(
+      prisma,
+      config,
+      payload,
+      {
         shop: session.shop,
-        direction: "OUTBOUND",
+        phoneNumber: recipientPhone,
+        ...(conversation ? { conversationId: conversation.id } : {}),
+        clientRequestId,
         type: messageType,
         text,
-        status: "PENDING",
-        clientRequestId,
       },
-      select: { id: true },
-    });
+    );
   } catch (error) {
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -487,36 +564,191 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         409,
       );
     }
+    if (error instanceof WhatsAppDemoConversationError) {
+      return json({ error: error.message }, 409);
+    }
     throw error;
   }
-
-  let whatsappMessageId: string;
-  try {
-    whatsappMessageId = await sendWhatsAppApiRequest(config, payload);
-  } catch (error) {
-    await prisma.whatsAppMessage.updateMany({
-      where: { id: pendingMessage.id, shop: session.shop },
-      data: { status: "FAILED" },
-    });
+  if (sendResult.error) {
     return json(
       {
-        error: `${whatsAppApiErrorMessage(error)} Check the Inbox before retrying if Meta's response timed out.`,
-        messageId: pendingMessage.id,
+        error: `${whatsAppApiErrorMessage(sendResult.error)} Check the Inbox before retrying if Meta's response timed out.`,
+        messageId: sendResult.pendingMessage.messageId,
+        conversationId: sendResult.pendingMessage.conversationId,
       },
       502,
     );
   }
-
-  await prisma.$transaction((transaction) =>
-    recordWhatsAppMessageAccepted(transaction, {
-      id: pendingMessage.id,
-      conversationId: conversation.id,
-      shop: session.shop,
-      whatsappMessageId,
-    }),
-  );
-  return json({ success: "Message accepted by Meta.", messageId: pendingMessage.id });
+  return json({
+    success: "Message accepted by Meta.",
+    messageId: sendResult.pendingMessage.messageId,
+    conversationId: sendResult.pendingMessage.conversationId,
+  });
 };
+
+type TemplateOption = Awaited<ReturnType<typeof loader>>["approvedTemplates"][number];
+
+function TemplateInputFields({
+  template,
+  input,
+  onChange,
+  disabled,
+  idPrefix,
+}: {
+  template: TemplateOption | undefined;
+  input: WhatsAppTemplateInput;
+  onChange: (next: WhatsAppTemplateInput) => void;
+  disabled: boolean;
+  idPrefix: string;
+}) {
+  const requirements: WhatsAppTemplateRequirements | null =
+    template?.requirements ?? null;
+  let preview = "";
+  let validationMessage = "";
+  if (template && requirements) {
+    try {
+      preview = parseWhatsAppTemplateInput(
+        JSON.stringify(input),
+        template.components,
+      ).preview;
+    } catch (error) {
+      validationMessage =
+        error instanceof Error ? error.message : "Complete all required template fields.";
+    }
+  }
+
+  const updateBody = (index: number, value: string) => {
+    const body = [...(input.body ?? [])];
+    body[index] = value;
+    onChange({ ...input, body });
+  };
+  const updateHeaderText = (index: number, value: string) => {
+    const header = input.header?.format === "TEXT" ? input.header : { format: "TEXT" as const };
+    const values = [...(header.values ?? [])];
+    values[index] = value;
+    onChange({ ...input, header: { ...header, values } });
+  };
+  const updateImageHeader = (
+    field: "mediaType" | "value",
+    value: string,
+  ) => {
+    const header = input.header?.format === "IMAGE" ? input.header : { format: "IMAGE" as const };
+    onChange({ ...input, header: { ...header, [field]: value } as WhatsAppTemplateInput["header"] });
+  };
+  const updateButton = (buttonIndex: number, parameterIndex: number, value: string) => {
+    const buttons = { ...(input.buttons ?? {}) };
+    const values = [...(buttons[String(buttonIndex)] ?? [])];
+    values[parameterIndex] = value;
+    buttons[String(buttonIndex)] = values;
+    onChange({ ...input, buttons });
+  };
+
+  return (
+    <>
+      <input
+        type="hidden"
+        name="templateInput"
+        value={JSON.stringify(input)}
+      />
+      {template?.componentError && (
+        <p className="bc-inbox-error" role="alert">{template.componentError}</p>
+      )}
+      {requirements?.unsupported && (
+        <p className="bc-inbox-error" role="alert">{requirements.unsupported}</p>
+      )}
+      {requirements?.header?.format === "TEXT" &&
+        requirements.header.variables.map((variable, index) => (
+          <label className="bc-template-input" key={`header-${variable.key}`}>
+            Text header · {variable.label}
+            <input
+              type="text"
+              value={input.header?.format === "TEXT" ? input.header.values?.[index] ?? "" : ""}
+              maxLength={1024}
+              required
+              disabled={disabled}
+              onChange={(event) => updateHeaderText(index, event.target.value)}
+            />
+          </label>
+        ))}
+      {requirements?.header?.format === "IMAGE" && (
+        <div className="bc-template-input">
+          <label htmlFor={`${idPrefix}-header-source`}>Image header source</label>
+          <select
+            id={`${idPrefix}-header-source`}
+            value={input.header?.format === "IMAGE" ? input.header.mediaType ?? "" : ""}
+            required
+            disabled={disabled}
+            onChange={(event) => updateImageHeader("mediaType", event.target.value)}
+          >
+            <option value="">Choose image source</option>
+            <option value="url">Public HTTPS image URL</option>
+            <option value="id">WhatsApp media ID</option>
+          </select>
+          <label htmlFor={`${idPrefix}-header-image`}>
+            {input.header?.format === "IMAGE" && input.header.mediaType === "id"
+              ? "Image media ID"
+              : "Image URL"}
+          </label>
+          <input
+            id={`${idPrefix}-header-image`}
+            type="text"
+            value={input.header?.format === "IMAGE" ? input.header.value ?? "" : ""}
+            placeholder={input.header?.format === "IMAGE" && input.header.mediaType === "id" ? "Numeric WhatsApp media ID" : "https://…"}
+            maxLength={2048}
+            required
+            disabled={disabled}
+            onChange={(event) => updateImageHeader("value", event.target.value)}
+          />
+          <p className="bc-inbox-hint">
+            A URL must be publicly fetchable by Meta over HTTPS. Media IDs must belong to the configured WhatsApp Cloud API phone number.
+          </p>
+        </div>
+      )}
+      {requirements?.bodyVariables.map((variable, index) => (
+        <label className="bc-template-input" key={`body-${variable.key}`}>
+          Body · {variable.label}
+          <input
+            type="text"
+            value={input.body?.[index] ?? ""}
+            maxLength={1024}
+            required
+            disabled={disabled}
+            onChange={(event) => updateBody(index, event.target.value)}
+          />
+        </label>
+      ))}
+      {requirements?.buttons.map((button) =>
+        button.variables.map((variable, index) => (
+          <label
+            className="bc-template-input"
+            key={`button-${button.index}-${variable.key}`}
+          >
+            Button URL · {button.label} · {variable.label}
+            <input
+              type="text"
+              value={input.buttons?.[String(button.index)]?.[index] ?? ""}
+              maxLength={1024}
+              required
+              disabled={disabled}
+              onChange={(event) =>
+                updateButton(button.index, index, event.target.value)
+              }
+            />
+          </label>
+        )),
+      )}
+      {requirements && template && !requirements.unsupported && (
+        <div className="bc-template-preview" aria-live="polite">
+          <strong>Message preview</strong>
+          <p>{preview || requirements.bodyText || "Approved template with no body text."}</p>
+          {validationMessage && (
+            <p className="bc-template-preview-hint">{validationMessage}</p>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
 
 export default function InboxPage() {
   const {
@@ -530,26 +762,40 @@ export default function InboxPage() {
     webhookVerified,
     testSendingOptIn,
     testSendingReady,
+    inboxSendingOptIn,
+    inboxSendingReady,
     activeShopDomain,
     configuredShopDomain,
     tenantBound,
     webhookConfigurationComplete,
   } = useLoaderData<typeof loader>();
   const actionFetcher = useFetcher<InboxActionData>();
+  const newChatFetcher = useFetcher<InboxActionData>();
   const revalidator = useRevalidator();
+  const navigate = useNavigate();
+  const newChatDialogRef = useRef<HTMLDialogElement>(null);
+  const handledNewChatMessageRef = useRef<string | null>(null);
   const [mode, setMode] = useState<"reply" | "template">("reply");
   const [templateId, setTemplateId] = useState("");
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  const [newChatTemplateId, setNewChatTemplateId] = useState("");
+  const [newChatRecipient, setNewChatRecipient] = useState("");
+  const [newChatInput, setNewChatInput] = useState<WhatsAppTemplateInput>({});
+  const [newChatRequestId, setNewChatRequestId] = useState("");
   const [testRecipientInput, setTestRecipientInput] = useState(
     testRecipientPhone ?? selectedConversation?.phoneNumber ?? "",
   );
   const [clientRequestId, setClientRequestId] = useState("");
   const [replyText, setReplyText] = useState("");
-  const [templateParametersInput, setTemplateParametersInput] = useState("");
+  const [replyTemplateInput, setReplyTemplateInput] = useState<WhatsAppTemplateInput>({});
   useEffect(() => {
     if (!clientRequestId) {
       setClientRequestId(globalThis.crypto.randomUUID());
     }
   }, [clientRequestId]);
+  useEffect(() => {
+    if (!newChatRequestId) setNewChatRequestId(globalThis.crypto.randomUUID());
+  }, [newChatRequestId]);
   useEffect(() => {
     setTestRecipientInput(
       testRecipientPhone ?? selectedConversation?.phoneNumber ?? "",
@@ -559,10 +805,41 @@ export default function InboxPage() {
     if (actionFetcher.data?.success && actionFetcher.data.messageId) {
       setClientRequestId(globalThis.crypto.randomUUID());
       setReplyText("");
-      setTemplateParametersInput("");
+      setReplyTemplateInput({});
       setTemplateId("");
     }
   }, [actionFetcher.data?.messageId, actionFetcher.data?.success]);
+  useEffect(() => {
+    const data = newChatFetcher.data;
+    if (
+      !data?.conversationId ||
+      !data.messageId ||
+      handledNewChatMessageRef.current === data.messageId
+    ) {
+      return;
+    }
+    handledNewChatMessageRef.current = data.messageId;
+    const conversationId = data.conversationId;
+    void revalidator.revalidate();
+    void navigate(`/app/inbox?conversation=${encodeURIComponent(conversationId)}`);
+    if (data.success) {
+      setNewChatOpen(false);
+      setNewChatRecipient("");
+      setNewChatTemplateId("");
+      setNewChatInput({});
+      setNewChatRequestId(globalThis.crypto.randomUUID());
+    }
+  }, [
+    navigate,
+    newChatFetcher.data,
+    revalidator,
+  ]);
+  useEffect(() => {
+    const dialog = newChatDialogRef.current;
+    if (!dialog) return;
+    if (newChatOpen && !dialog.open) dialog.showModal();
+    if (!newChatOpen && dialog.open) dialog.close();
+  }, [newChatOpen]);
   useEffect(() => {
     if (revalidator.state !== "idle") return;
 
@@ -585,15 +862,19 @@ export default function InboxPage() {
   const selectedTemplate = approvedTemplates.find(
     (templateOption) => templateOption.id === templateId,
   );
+  const newChatTemplate = approvedTemplates.find(
+    (templateOption) => templateOption.id === newChatTemplateId,
+  );
   const isSelectedTestRecipient = Boolean(
     selectedConversation &&
       !selectedConversation.isDemo &&
       testRecipientPhone === selectedConversation.phoneNumber,
   );
   const testSendAvailable =
-    testSendingReady &&
-    testRecipientHasInbound &&
-    isSelectedTestRecipient;
+    inboxSendingReady ||
+    (testSendingReady &&
+      testRecipientHasInbound &&
+      isSelectedTestRecipient);
   const isReplyAllowed =
     selectedConversation?.isDemo ||
     isInsideCustomerServiceWindow(
@@ -624,9 +905,9 @@ export default function InboxPage() {
 
         <section className="bc-test-gate" aria-labelledby="test-gate-heading">
           <div>
-            <h2 id="test-gate-heading">Personal-phone test only</h2>
+            <h2 id="test-gate-heading">WhatsApp sending controls</h2>
             <p>
-              Real sends are restricted to one server-configured test recipient. No campaign or other customer sends are enabled.
+              General Inbox sending and the restricted personal-phone test path are separately gated. Campaign and scheduled sending remain disabled.
             </p>
           </div>
           <ul>
@@ -655,6 +936,12 @@ export default function InboxPage() {
             </li>
             <li data-ready={testSendingOptIn}>
               Test-only sending switch: {testSendingOptIn ? "enabled" : "disabled"}
+            </li>
+            <li data-ready={inboxSendingOptIn}>
+              General Inbox sending switch: {inboxSendingOptIn ? "enabled" : "disabled"}
+            </li>
+            <li data-ready={inboxSendingReady}>
+              General Inbox sending: {inboxSendingReady ? "ready" : "blocked until switch, shop, Cloud API configuration, and webhook verification are ready"}
             </li>
           </ul>
           <p className="bc-inbox-shop-binding">
@@ -695,9 +982,12 @@ export default function InboxPage() {
             </ol>
             <p>
               POST signature checks use the existing{" "}
-              <code>META_APP_SECRET</code>. Sending remains disabled unless you
-              explicitly enable the test-only switch after the webhook and
-              recipient checks succeed.
+              <code>META_APP_SECRET</code>. General Inbox sending remains
+              disabled unless{" "}
+              <code> WHATSAPP_INBOX_SENDING_ENABLED=true</code> is explicitly
+              set after webhook verification and policy/consent review. The
+              older test switch and its recipient allowlist only enable the
+              restricted test path; they do not unlock general Inbox sends.
             </p>
           </div>
           <p className="bc-inbox-hint">
@@ -707,10 +997,148 @@ export default function InboxPage() {
 
         <div className="bc-inbox-shell">
           <aside className="bc-conversation-list" aria-label="Conversations">
-            <h2>Conversations</h2>
+            <div className="bc-conversation-list-heading">
+              <h2>Conversations</h2>
+              <button
+                className="bc-button bc-button-primary"
+                type="button"
+                onClick={() => setNewChatOpen(true)}
+              >
+                Start New Chat
+              </button>
+            </div>
+            {newChatOpen &&
+              createPortal(
+                <dialog
+                  className="bc-new-chat-dialog"
+                  ref={newChatDialogRef}
+                  aria-labelledby="bc-new-chat-heading"
+                  onCancel={() => setNewChatOpen(false)}
+                >
+                  <header>
+                    <div>
+                      <h2 id="bc-new-chat-heading">Start New Chat</h2>
+                      <p>Send an approved template to begin a WhatsApp conversation.</p>
+                    </div>
+                    <button
+                      className="bc-button"
+                      type="button"
+                      onClick={() => setNewChatOpen(false)}
+                      disabled={newChatFetcher.state !== "idle"}
+                    >
+                      Close
+                    </button>
+                  </header>
+                  <newChatFetcher.Form method="post" className="bc-new-chat-form">
+                    <input type="hidden" name="intent" value="start-new-chat" />
+                    <input
+                      type="hidden"
+                      name="clientRequestId"
+                      value={newChatRequestId}
+                    />
+                    <label htmlFor="bc-new-chat-phone">
+                      Recipient phone number (international format)
+                    </label>
+                    <input
+                      id="bc-new-chat-phone"
+                      name="recipientPhone"
+                      type="tel"
+                      autoComplete="tel"
+                      placeholder="+15551234567"
+                      value={newChatRecipient}
+                      onChange={(event) => setNewChatRecipient(event.target.value)}
+                      required
+                      pattern="\\+[0-9 ()-]{7,24}"
+                      disabled={newChatFetcher.state !== "idle"}
+                    />
+                    <label htmlFor="bc-new-chat-template">
+                      Approved template and language
+                    </label>
+                    <select
+                      id="bc-new-chat-template"
+                      name="templateId"
+                      value={newChatTemplateId}
+                      required
+                      disabled={newChatFetcher.state !== "idle"}
+                      onChange={(event) => {
+                        setNewChatTemplateId(event.target.value);
+                        setNewChatInput({});
+                      }}
+                    >
+                      <option value="">Choose a synced approved template</option>
+                      {approvedTemplates.map((templateOption) => (
+                        <option
+                          key={templateOption.id}
+                          value={templateOption.id}
+                          disabled={!templateOption.requirements || Boolean(templateOption.componentError)}
+                        >
+                          {templateOption.name} · {templateOption.language} · {templateOption.category}
+                        </option>
+                      ))}
+                    </select>
+                    {newChatTemplate && (
+                      <TemplateInputFields
+                        template={newChatTemplate}
+                        input={newChatInput}
+                        onChange={setNewChatInput}
+                        disabled={newChatFetcher.state !== "idle"}
+                        idPrefix="new-chat"
+                      />
+                    )}
+                    <label className="bc-marketing-opt-in">
+                      <input
+                        type="checkbox"
+                        name="confirmRecipientOptIn"
+                        value="yes"
+                        required
+                        disabled={newChatFetcher.state !== "idle"}
+                      />
+                      I confirm this recipient opted in to receive WhatsApp messages from this business. Shopify email consent is not WhatsApp consent.
+                    </label>
+                    {!inboxSendingReady && (
+                      <p className="bc-inbox-notice" role="status">
+                        Sending is blocked until WHATSAPP_INBOX_SENDING_ENABLED is explicitly enabled and this shop, Cloud API configuration, and Meta webhook verification are ready. No message will be sent while this is blocked.
+                      </p>
+                    )}
+                    {newChatFetcher.data?.error && (
+                      <p className="bc-inbox-error" role="alert">
+                        {newChatFetcher.data.error}
+                      </p>
+                    )}
+                    <footer>
+                      <button
+                        className="bc-button"
+                        type="button"
+                        onClick={() => setNewChatOpen(false)}
+                        disabled={newChatFetcher.state !== "idle"}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="bc-button bc-button-primary"
+                        type="submit"
+                        disabled={
+                          !newChatRequestId ||
+                          !inboxSendingReady ||
+                          !newChatTemplate ||
+                          !newChatTemplate.requirements ||
+                          Boolean(newChatTemplate.requirements.unsupported) ||
+                          Boolean(newChatTemplate.componentError) ||
+                          normalizeE164Phone(newChatRecipient) === null ||
+                          !newChatRecipient.trim().startsWith("+") ||
+                          newChatFetcher.state !== "idle"
+                        }
+                      >
+                        {newChatFetcher.state !== "idle" ? "Sending template…" : "Start chat"}
+                      </button>
+                    </footer>
+                  </newChatFetcher.Form>
+                </dialog>,
+                document.body,
+              )}
             {conversations.length === 0 ? (
               <p className="bc-empty-state">
-                No conversations yet. Add the sample conversation to explore the inbox.
+                No conversations yet. Start a chat with an approved template or add a local sample.
               </p>
             ) : (
               conversations.map((conversation) => (
@@ -801,7 +1229,9 @@ export default function InboxPage() {
                   </p>
                 ) : !testSendAvailable ? (
                   <p className="bc-inbox-notice" role="status">
-                    Real sends are locked unless this is your allow-listed test recipient and the shop, credentials, Meta webhook verification, first inbound message, and test-only switch are all ready.
+                    {inboxSendingOptIn
+                      ? "General Inbox sending is blocked until the authenticated shop, Cloud API configuration, and Meta webhook verification all match."
+                      : "Test sends require the configured allow-listed phone, a signed inbound message, verified webhook, matching shop, and test-only switch. Normal Inbox sending has a separate explicit switch."}
                   </p>
                 ) : null}
 
@@ -836,21 +1266,31 @@ export default function InboxPage() {
                       <input type="hidden" name="intent" value="send-reply" />
                       {!selectedConversation.isDemo && (
                         <>
-                          <label htmlFor="inbox-test-recipient">Confirmed test recipient</label>
-                          <input
-                            id="inbox-test-recipient"
-                            name="testRecipientPhone"
-                            type="tel"
-                            autoComplete="tel"
-                            value={testRecipientInput}
-                            onChange={(event) => setTestRecipientInput(event.target.value)}
-                            placeholder="+15551234567"
-                            required
-                            disabled={actionFetcher.state !== "idle"}
-                          />
-                          <p className="bc-inbox-hint">
-                            Must match the single server allow-list. This form cannot send to another customer.
-                          </p>
+                          {inboxSendingOptIn ? (
+                            <input
+                              type="hidden"
+                              name="testRecipientPhone"
+                              value={selectedConversation.phoneNumber}
+                            />
+                          ) : (
+                            <>
+                              <label htmlFor="inbox-test-recipient">Configured test recipient</label>
+                              <input
+                                id="inbox-test-recipient"
+                                name="testRecipientPhone"
+                                type="tel"
+                                autoComplete="tel"
+                                value={testRecipientInput}
+                                onChange={(event) => setTestRecipientInput(event.target.value)}
+                                placeholder="+15551234567"
+                                required
+                                disabled={actionFetcher.state !== "idle"}
+                              />
+                              <p className="bc-inbox-hint">
+                                Test-only sending must match the configured single-recipient allow-list. Normal Inbox sending uses the conversation number only when explicitly enabled.
+                              </p>
+                            </>
+                          )}
                         </>
                       )}
                       {!isReplyAllowed && (
@@ -889,28 +1329,38 @@ export default function InboxPage() {
                   ) : (
                     <>
                       <input type="hidden" name="intent" value="send-template" />
-                      {!selectedConversation.isDemo && (
-                        <>
-                          <label htmlFor="inbox-template-recipient">Confirmed test recipient</label>
+                      {!selectedConversation.isDemo &&
+                        (inboxSendingOptIn ? (
                           <input
-                            id="inbox-template-recipient"
+                            type="hidden"
                             name="testRecipientPhone"
-                            type="tel"
-                            autoComplete="tel"
-                            value={testRecipientInput}
-                            onChange={(event) => setTestRecipientInput(event.target.value)}
-                            placeholder="+15551234567"
-                            required
-                            disabled={actionFetcher.state !== "idle"}
+                            value={selectedConversation.phoneNumber}
                           />
-                        </>
-                      )}
+                        ) : (
+                          <>
+                            <label htmlFor="inbox-template-recipient">Configured test recipient</label>
+                            <input
+                              id="inbox-template-recipient"
+                              name="testRecipientPhone"
+                              type="tel"
+                              autoComplete="tel"
+                              value={testRecipientInput}
+                              onChange={(event) => setTestRecipientInput(event.target.value)}
+                              placeholder="+15551234567"
+                              required
+                              disabled={actionFetcher.state !== "idle"}
+                            />
+                          </>
+                        ))}
                       <label htmlFor="inbox-template">Approved template</label>
                       <select
                         id="inbox-template"
                         name="templateId"
                         value={templateId}
-                        onChange={(event) => setTemplateId(event.target.value)}
+                        onChange={(event) => {
+                          setTemplateId(event.target.value);
+                          setReplyTemplateInput({});
+                        }}
                         required
                         disabled={actionFetcher.state !== "idle"}
                       >
@@ -921,36 +1371,32 @@ export default function InboxPage() {
                           </option>
                         ))}
                       </select>
-                      <label htmlFor="inbox-template-parameters">
-                        Body parameters (JSON string array, if required)
-                      </label>
-                      <textarea
-                        id="inbox-template-parameters"
-                        name="templateParameters"
-                        rows={2}
-                        placeholder={'["Alex", "order 123"]'}
-                        value={templateParametersInput}
-                        onChange={(event) => setTemplateParametersInput(event.target.value)}
-                        disabled={actionFetcher.state !== "idle"}
-                      />
+                      {selectedTemplate && (
+                        <TemplateInputFields
+                          template={selectedTemplate}
+                          input={replyTemplateInput}
+                          onChange={setReplyTemplateInput}
+                          disabled={actionFetcher.state !== "idle"}
+                          idPrefix="reply-template"
+                        />
+                      )}
                       {selectedTemplate && (
                         <p className="bc-inbox-hint">
                           {selectedTemplate.name} · {selectedTemplate.language} · {selectedTemplate.bodyParameterCount === null ? "Template placeholders need review" : `${selectedTemplate.bodyParameterCount} body parameter${selectedTemplate.bodyParameterCount === 1 ? "" : "s"} required`}
                         </p>
                       )}
-                      {!selectedConversation.isDemo &&
-                        selectedTemplate?.category.toUpperCase() === "MARKETING" && (
+                      {!selectedConversation.isDemo && (
                           <label className="bc-marketing-opt-in">
                             <input
                               type="checkbox"
-                              name="confirmMarketingOptIn"
+                              name="confirmRecipientOptIn"
                               value="yes"
                               required
                               disabled={actionFetcher.state !== "idle"}
                             />
-                            I have verified this test recipient explicitly opted in to WhatsApp marketing.
+                            I confirm this recipient explicitly opted in to receive WhatsApp messages from this business. Shopify email consent is not WhatsApp consent.
                           </label>
-                        )}
+                      )}
                       <button
                         className="bc-button bc-button-primary"
                         type="submit"
@@ -958,6 +1404,9 @@ export default function InboxPage() {
                           !templateId ||
                           approvedTemplates.length === 0 ||
                           (!selectedConversation.isDemo && !testSendAvailable) ||
+                          !selectedTemplate?.requirements ||
+                          Boolean(selectedTemplate.requirements.unsupported) ||
+                          Boolean(selectedTemplate.componentError) ||
                           selectedTemplate?.bodyParameterCount === null ||
                           !clientRequestId ||
                           actionFetcher.state !== "idle"

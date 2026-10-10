@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { Prisma } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import {
   getWhatsAppStatusTransition,
   normalizeE164Phone,
@@ -21,6 +21,8 @@ export class WhatsAppApiError extends Error {
     super("WhatsApp API request failed");
   }
 }
+
+export class WhatsAppDemoConversationError extends Error {}
 
 const requiredEnvironment = (key: string) => process.env[key]?.trim();
 
@@ -67,6 +69,65 @@ export const getWhatsAppTestRecipient = () => {
 
 export const isWhatsAppTestSendingEnabled = () =>
   requiredEnvironment("WHATSAPP_TEST_SENDING_ENABLED") === "true";
+
+export const isWhatsAppInboxSendingEnabled = () =>
+  requiredEnvironment("WHATSAPP_INBOX_SENDING_ENABLED") === "true";
+
+export const createPendingWhatsAppConversationMessage = async (
+  database: PrismaClient,
+  input: {
+    shop: string;
+    phoneNumber: string;
+    conversationId?: string;
+    clientRequestId: string;
+    type: "TEXT" | "TEMPLATE";
+    text: string;
+  },
+) =>
+  database.$transaction(async (transaction) => {
+    const conversation = input.conversationId
+      ? await transaction.whatsAppConversation.findFirst({
+          where: { id: input.conversationId, shop: input.shop },
+        })
+      : await transaction.whatsAppConversation.upsert({
+          where: {
+            shop_phoneNumber: {
+              shop: input.shop,
+              phoneNumber: input.phoneNumber,
+            },
+          },
+          create: {
+            shop: input.shop,
+            phoneNumber: input.phoneNumber,
+            isDemo: false,
+          },
+          update: {},
+        });
+    if (!conversation) throw new Error("WhatsApp conversation not found for this shop.");
+    if (conversation.isDemo) {
+      throw new WhatsAppDemoConversationError(
+        "Sample conversations cannot be used for live WhatsApp sends.",
+      );
+    }
+
+    const message = await transaction.whatsAppMessage.create({
+      data: {
+        conversationId: conversation.id,
+        shop: input.shop,
+        direction: "OUTBOUND",
+        type: input.type,
+        text: input.text,
+        status: "PENDING",
+        clientRequestId: input.clientRequestId,
+      },
+      select: { id: true },
+    });
+    await transaction.whatsAppConversation.update({
+      where: { id: conversation.id, shop: input.shop },
+      data: { lastMessageAt: new Date() },
+    });
+    return { conversationId: conversation.id, messageId: message.id };
+  });
 
 export const isWhatsAppWebhookConfigurationComplete = () =>
   Boolean(
@@ -166,6 +227,44 @@ export const recordWhatsAppMessageAccepted = async (
   }
 };
 
+export const sendAndPersistWhatsAppMessage = async (
+  database: PrismaClient,
+  config: WhatsAppConfig,
+  payload: Record<string, unknown>,
+  input: {
+    shop: string;
+    phoneNumber: string;
+    conversationId?: string;
+    clientRequestId: string;
+    type: "TEXT" | "TEMPLATE";
+    text: string;
+  },
+) => {
+  const pendingMessage = await createPendingWhatsAppConversationMessage(
+    database,
+    input,
+  );
+  let whatsappMessageId: string;
+  try {
+    whatsappMessageId = await sendWhatsAppApiRequest(config, payload);
+  } catch (error) {
+    await database.whatsAppMessage.updateMany({
+      where: { id: pendingMessage.messageId, shop: input.shop },
+      data: { status: "FAILED" },
+    });
+    return { pendingMessage, error };
+  }
+  await database.$transaction((transaction) =>
+    recordWhatsAppMessageAccepted(transaction, {
+      id: pendingMessage.messageId,
+      conversationId: pendingMessage.conversationId,
+      shop: input.shop,
+      whatsappMessageId,
+    }),
+  );
+  return { pendingMessage, error: null };
+};
+
 export const whatsAppApiErrorMessage = (error: unknown) => {
   if (error instanceof WhatsAppConfigurationError) return error.message;
   if (error instanceof WhatsAppApiError) {
@@ -179,7 +278,7 @@ export const whatsAppApiErrorMessage = (error: unknown) => {
       return "Meta requires an approved template because the 24-hour customer-service window has closed.";
     }
     if (error.code === 131026) {
-      return "Meta could not deliver to this test recipient. Verify the number and its WhatsApp eligibility.";
+      return "Meta could not deliver to this recipient. Verify the number and its WhatsApp eligibility.";
     }
     if (error.code === 132000 || error.code === 132001) {
       return "Meta rejected this template or its parameters. Confirm the template is approved and its body parameters match.";

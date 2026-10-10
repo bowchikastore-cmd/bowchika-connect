@@ -1,5 +1,8 @@
 # Shopify App Template - React Router
 
+For beginner-friendly setup instructions for this existing private app on
+another Mac, see [HOME_SETUP.md](./HOME_SETUP.md).
+
 This is a template for building a [Shopify app](https://shopify.dev/docs/apps/getting-started) using [React Router](https://reactrouter.com/). It was forked from the [Shopify Remix app template](https://github.com/Shopify/shopify-app-template-remix) and converted to React Router.
 
 Rather than cloning this repo, follow the [Quick Start steps](https://github.com/Shopify/shopify-app-template-react-router#quick-start).
@@ -79,7 +82,7 @@ For more information on the Shopify Dev MCP please read [the documentation](http
 
 ### Application Storage
 
-This app uses [Prisma](https://www.prisma.io/) for Shopify sessions, customer segments, templates, campaign drafts, and Inbox records. Local development keeps the existing SQLite schema at `prisma/schema.prisma`, using `DATABASE_URL=file:dev.sqlite` from `.env.example` and the ignored local `.env`.
+This app uses [Prisma](https://www.prisma.io/) for Shopify sessions, customer segments, templates, campaign drafts, and Inbox records. Local development keeps the existing SQLite schema at `prisma/schema.prisma`, using a local `DATABASE_URL` setting in the ignored `.env` file (for example `file:dev.sqlite`).
 
 ### Render Free + Neon Free evaluation
 
@@ -98,7 +101,7 @@ The baseline migration creates an **empty schema only**. It has not been applied
 ### Manual Render and Neon setup (not performed here)
 
 1. Create a Neon Free project and database. Choose a region close to the Render service. From Neon's **Connect** dialog copy both URLs: the **pooled** URL (hostname includes `-pooler`) for `DATABASE_URL`, and the direct/unpooled URL for `DATABASE_URL_UNPOOLED`. Keep Neon's TLS parameters as supplied. These are entered only in Render's environment settings; never commit them.
-2. Connect the repository to Render and create a Blueprint from `render.yaml`. It prompts for `SHOPIFY_APP_URL`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, both Neon URLs, and the existing WhatsApp secret values declared with `sync: false`. `SHOPIFY_APP_URL` must be the actual HTTPS Render service origin shown after service creation; it is intentionally not guessed here. Keep `WHATSAPP_TEST_SENDING_ENABLED` unset/false and never add a live or campaign sending switch.
+2. Connect the repository to Render and create a Blueprint from `render.yaml`. It prompts for `SHOPIFY_APP_URL`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, both Neon URLs, and the existing WhatsApp secret values declared with `sync: false`. `SHOPIFY_APP_URL` must be the HTTPS Render service origin. Keep both `WHATSAPP_TEST_SENDING_ENABLED` and `WHATSAPP_INBOX_SENDING_ENABLED` unset/false; never enable campaign or scheduled sending.
 3. The first deploy applies the PostgreSQL baseline to Neon. This creates schema but does not migrate any SQLite rows. Verify logs, tables, and app health before connecting any live Shopify configuration.
 4. The separate production config is `shopify.app.production.toml`, with the Render app origin and the React Router OAuth callback at `/auth/callback`. In Shopify Dev Dashboard, set App URL to `https://bowchika-connect.onrender.com` and add `https://bowchika-connect.onrender.com/auth/callback` as an allowed redirection URL. Keep the current `shopify.app.toml` as the Shopify CLI-managed development config and continue using it for the dev store.
 5. Do not change Meta webhook subscriptions or callback URLs until the permanent host is running and explicitly approved. Pabbly and Shiprocket are not part of this deployment configuration.
@@ -256,9 +259,13 @@ Internationalization:
 
 ## WhatsApp Inbox
 
-The Inbox is available at **Inbox** in the embedded app navigation. It stores shop-scoped conversations and message history in Prisma. **Add sample conversation** creates a local-only demo record; sending a reply in a demo conversation never calls Meta.
+The Inbox is available at **Inbox** in the embedded app navigation. It stores shop-scoped conversations and message history in Prisma. **Add sample conversation** creates a local-only demo record; sending a reply in a demo conversation never calls Meta. Start New Chat uses the existing conversation/message tables, so this feature requires no Prisma schema change or database migration.
 
-General/live sending is not enabled. A separately gated personal-phone test path is disabled unless `WHATSAPP_TEST_SENDING_ENABLED=true` is explicitly set. It also requires one exact shop binding and one allow-listed recipient, a successful Meta GET webhook verification, and a signed inbound message from that same recipient. It cannot send to other conversation numbers or launch campaigns. The current server-environment credential model supports one configured shop/WhatsApp phone-number pairing per deployment; do not bind or move the Cloud API number.
+General Inbox sending is disabled by default with `WHATSAPP_INBOX_SENDING_ENABLED=false`. The Inbox has **Start New Chat**, which sends an approved synced template to an operator-entered international phone number, and collects body/header/media/dynamic URL-button values from the stored Meta definition. It creates the shop-scoped conversation and a pending outbound message before calling Meta, persists accepted/failed status and message IDs, and rejects duplicate client request IDs. The app does not infer WhatsApp consent from Shopify email consent: an operator must affirm explicit WhatsApp opt-in for every real template send. Verify opt-in and Meta policy outside the app before affirming it.
+
+To deliberately enable regular Inbox messaging, first deploy the code with the switch off and verify the correct shop binding, Cloud API credentials, signed webhook, synced approved templates, and recipient-consent process. Only after those checks, set `WHATSAPP_INBOX_SENDING_ENABLED=true` in the Render service environment and restart/redeploy the service. This allows authenticated Inbox operators to send to the conversation's phone number (including initiating with an approved template); it is not an allowlist and can send to any entered/conversation number after the per-send consent attestation. It does not enable campaigns or scheduled sending. Keep it unset/false until explicitly approved. This production environment change is not made by this code task.
+
+The existing `WHATSAPP_TEST_SENDING_ENABLED` switch remains an isolated personal-phone test path; it requires one exact shop binding and one allow-listed recipient, a successful Meta GET webhook verification, and a signed inbound message from that same recipient. It cannot send to other conversation numbers. General Inbox sends use their own explicit switch rather than being silently blocked by that test allowlist. The current server-environment credential model supports one configured shop/WhatsApp phone-number pairing per deployment; do not bind or move the Cloud API number.
 
 The existing environment already uses `META_APP_ID` and `META_APP_SECRET`; webhook signature validation reuses `META_APP_SECRET` (do not create a duplicate app-secret variable). The existing Cloud API credential names are:
 
@@ -269,13 +276,14 @@ The existing environment already uses `META_APP_ID` and `META_APP_SECRET`; webho
 - `WHATSAPP_SHOP_DOMAIN` set to the one bound shop's exact `*.myshopify.com` domain.
 - `WHATSAPP_TEST_RECIPIENT_PHONE` set to your own test phone in E.164 form (for example `+15551234567`).
 - `WHATSAPP_TEST_SENDING_ENABLED=true` only after webhook verification and a real inbound message from that allow-listed phone; leave it unset/false otherwise.
+- `WHATSAPP_INBOX_SENDING_ENABLED=false` by default. Set it to `true` only after separately verifying the live shop binding, Cloud API configuration, Meta webhook verification, operator access, approved templates, and your WhatsApp opt-in process. This enables normal Inbox sends beyond the test recipient allowlist; it does not turn on campaigns.
 - Optionally, `META_GRAPH_API_VERSION` (defaults to `v23.0`).
 
 The configured shop must exactly match the shop returned by Shopify authentication (`session.shop`). The Inbox shows both domains and reports a mismatch separately from a missing variable. It never substitutes a development shop for another configured shop; authenticate the app on the intended store before expecting the binding check to pass. After editing `.env`, restart `shopify app dev` so the server reads the updated environment.
 
 Vite explicitly loads the WhatsApp/Meta server settings from the active `.env` files into the Node server process. These variables are not prefixed with `VITE_` and are not exposed to browser code. An inherited shell/server value takes precedence over the file.
 
-The development environment may also require the existing Shopify app variables `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, and `SHOPIFY_APP_URL`. Keep every credential in the hosting provider's secret manager or ignored local `.env`; do not commit them or expose them to browser code. The Inbox enforces the 24-hour customer-service window for free-form replies, checks body parameter counts against the synced approved template components, and requires an explicit opt-in confirmation for marketing templates. Shopify email consent is not WhatsApp consent. Meta API errors are surfaced without logging credentials.
+The development environment may also require the existing Shopify app variables `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, and `SHOPIFY_APP_URL`. Keep every credential in the hosting provider's secret manager or ignored local `.env`; do not commit them or expose them to browser code. The Inbox enforces the 24-hour customer-service window for free-form replies, validates supported template header/body/button parameters against the synced approved definition, previews the substituted content, and requires explicit opt-in confirmation for every real template send. Unsupported template component types are blocked rather than omitted. Shopify email consent is not WhatsApp consent. Meta API errors are surfaced without logging credentials.
 
 ### Migration and webhook setup
 
