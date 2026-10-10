@@ -1,0 +1,306 @@
+:root {
+  color-scheme: light;
+  --bc-bg: #f5f7f5;
+  --bc-surface: #ffffff;
+  --bc-surface-muted: #f2f5f2;
+  --bc-text: #202722;
+  --bc-heading: #17251e;
+  --bc-muted: #66716a;
+  --bc-border: #dce3dd;
+  --bc-primary: #174a38;
+  --bc-primary-hover: #103b2c;
+  --bc-primary-contrast: #ffffff;
+  --bc-secondary-button: #eef3ef;
+  --bc-link: #174a38;
+  --bc-link-hover: #103b2c;
+  --bc-placeholder: #657169;
+  --bc-focus: #174a38;
+  --bc-disabled-bg: #e8ede9;
+  --bc-disabled-text: #59635c;
+  --bc-disabled-border: #cbd4cd;
+  --bc-success: #067647;
+  --bc-success-bg: #edf8f1;
+  --bc-success-border: #b6d9c2;
+  --bc-danger: #b42318;
+  --bc-danger-bg: #fff1f0;
+  --bc-warning: #8b6415;
+  --bc-card-padding: 18px;
+  --bc-control-padding: 10px 12px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bc-bg: #141a17;
+  --bc-surface: #1d2521;
+  --bc-surface-muted: #242f29;
+  --bc-text: #edf3ef;
+  --bc-heading: #f4f7f5;
+  --bc-muted: #b6c3ba;
+  --bc-border: #46574c;
+  --bc-primary: #286449;
+  --bc-primary-hover: #347a5a;
+  --bc-primary-contrast: #ffffff;
+  --bc-secondary-button: #2a352e;
+  --bc-link: #a6d7b7;
+  --bc-link-hover: #c2e7cd;
+  --bc-placeholder: #b6c3ba;
+  --bc-focus: #8dcc9f;
+  --bc-disabled-bg: #2a332e;
+  --bc-disabled-text: #aab6ae;
+  --bc-disabled-border: #4b5950;
+  --bc-success: #74c598;
+  --bc-success-bg: #1d3327;
+  --bc-success-border: #365c45;
+  --bc-danger: #ff928a;
+  --bc-danger-bg: #3a2423;
+  --bc-warning: #e4c27c;
+}
+
+:root[data-density="compact"] {
+  --bc-card-padding: 12px;
+  --bc-control-padding: 7px 10px;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+  background: var(--bc-bg);
+  color: var(--bc-text);
+}
+
+body,
+button,
+input,
+select {
+  font-family: "Inter", "Avenir Next", sans-serif;
+}
+
+#bowchika-app {
+  min-height: 100vh;
+  background: var(--bc-bg);
+  color: var(--bc-text);
+}
+
+.bc-shell-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 6px 24px;
+  background: var(--bc-surface);
+}
+
+.bc-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--bc-text);
+  text-decoration: none;
+}
+
+#bowchika-app .bc-brand {
+  color: var(--bc-text);
+}
+
+.bc-brand img {
+  width: 30px;
+  height: 30px;
+}
+
+.bc-brand-name {
+  display: block;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.bc-brand-tagline {
+  display: block;
+  margin-top: 2px;
+  color: var(--bc-muted);
+  font-size: 11px;
+}
+
+.bc-main {
+  width: min(1320px, 100%);
+  box-sizing: border-box;
+  margin: 0 auto;
+  padding: 24px 28px 32px;
+}
+
+.bc-footer {
+  padding: 18px 28px 24px;
+  border-top: 1px solid var(--bc-border);
+  color: var(--bc-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+#bowchika-app s-page {
+  display: block;
+  color: var(--bc-text);
+}
+
+#bowchika-app h1,
+#bowchika-app h2,
+#bowchika-app h3,
+#bowchika-app h4,
+#bowchika-app label,
+#bowchika-app strong,
+#bowchika-app th {
+  color: var(--bc-heading);
+}
+
+#bowchika-app a {
+  color: var(--bc-link);
+}
+
+#bowchika-app a:hover {
+  color: var(--bc-link-hover);
+}
+
+#bowchika-app input,
+#bowchika-app select {
+  color: var(--bc-text);
+  background: var(--bc-surface);
+}
+
+#bowchika-app input[type="checkbox"] {
+  accent-color: var(--bc-primary);
+}
+
+#bowchika-app button {
+  font: inherit;
+}
+
+#bowchika-app th {
+  color: var(--bc-muted);
+  font-weight: 600;
+}
+
+#bowchika-app input::placeholder {
+  color: var(--bc-placeholder);
+  opacity: 1;
+}
+
+#bowchika-app button:not(:disabled):hover {
+  border-color: var(--bc-primary);
+  filter: brightness(0.94);
+}
+
+#bowchika-app button.bc-button-primary:not(:disabled):hover {
+  background: var(--bc-primary-hover) !important;
+  filter: none;
+}
+
+#bowchika-app button:disabled {
+  border-color: var(--bc-disabled-border) !important;
+  color: var(--bc-disabled-text) !important;
+  background: var(--bc-disabled-bg) !important;
+  cursor: not-allowed;
+  filter: none;
+  opacity: 1;
+}
+
+#bowchika-app input:focus-visible,
+#bowchika-app select:focus-visible,
+#bowchika-app button:focus-visible,
+#bowchika-app a:focus-visible {
+  outline: 2px solid var(--bc-focus);
+  outline-offset: 2px;
+}
+
+.bc-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.bc-status-success {
+  color: var(--bc-success);
+  background: var(--bc-success-bg);
+}
+
+.bc-status-error {
+  color: var(--bc-danger);
+  background: var(--bc-danger-bg);
+}
+
+.bc-empty-state {
+  padding: var(--bc-card-padding);
+  border: 1px dashed var(--bc-border);
+  border-radius: 8px;
+  color: var(--bc-muted);
+  background: var(--bc-surface);
+}
+
+dialog.bc-dialog {
+  max-width: min(560px, calc(100vw - 32px));
+  border: 1px solid var(--bc-border);
+  border-radius: 8px;
+  color: var(--bc-text);
+  background: var(--bc-surface);
+}
+
+dialog.bc-dialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+.bc-settings {
+  display: grid;
+  gap: 16px;
+  max-width: 760px;
+}
+
+.bc-settings-group {
+  display: grid;
+  gap: 12px;
+  padding: var(--bc-card-padding);
+  border: 1px solid var(--bc-border);
+  border-radius: 8px;
+  background: var(--bc-surface);
+}
+
+.bc-settings-choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bc-setting-choice {
+  padding: var(--bc-control-padding);
+  border: 1px solid var(--bc-border);
+  border-radius: 6px;
+  color: var(--bc-text);
+  background: var(--bc-surface);
+  cursor: pointer;
+}
+
+.bc-setting-choice[aria-pressed="true"] {
+  border-color: var(--bc-primary);
+  color: var(--bc-primary-contrast);
+  background: var(--bc-primary);
+}
+
+.bc-setting-choice:not([aria-pressed="true"]):hover {
+  background: var(--bc-secondary-button);
+}
+
+@media (max-width: 640px) {
+  .bc-shell-header {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .bc-main {
+    padding: 18px 16px 24px;
+  }
+
+  .bc-footer {
+    padding: 16px;
+  }
+}

@@ -1,0 +1,6 @@
+node_modules
+build
+public/build
+*/*.yml
+.shopify
+app_index.backup.tsx
