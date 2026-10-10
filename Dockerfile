@@ -2,6 +2,7 @@ FROM node:22-alpine
 RUN apk add --no-cache openssl
 
 EXPOSE 3000
+VOLUME ["/data"]
 
 WORKDIR /app
 

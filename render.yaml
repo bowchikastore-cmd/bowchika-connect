@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: bowchika-connect
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npx prisma generate --schema prisma/postgresql/schema.prisma && npm run build
+    startCommand: npx prisma migrate deploy --schema prisma/postgresql/schema.prisma && npm run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: SHOPIFY_APP_URL
+        sync: false
+      - key: SHOPIFY_API_KEY
+        sync: false
+      - key: SHOPIFY_API_SECRET
+        sync: false
+      - key: SCOPES
+        value: read_customers,read_orders
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_URL_UNPOOLED
+        sync: false
+      - key: WHATSAPP_SHOP_DOMAIN
+        value: 2dcdue-dq.myshopify.com
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_BUSINESS_ACCOUNT_ID
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: WHATSAPP_WEBHOOK_VERIFY_TOKEN
+        sync: false
+      - key: META_GRAPH_API_VERSION
+        value: v23.0

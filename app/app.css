@@ -290,6 +290,391 @@ dialog.bc-dialog::backdrop {
   background: var(--bc-secondary-button);
 }
 
+.bc-inbox {
+  display: grid;
+  gap: 16px;
+}
+
+.bc-inbox-header,
+.bc-message-header,
+.bc-conversation-top,
+.bc-conversation-bottom,
+.bc-message footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.bc-inbox-header h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.bc-inbox-header p,
+.bc-message-header p {
+  margin: 5px 0 0;
+  color: var(--bc-muted);
+  font-size: 13px;
+}
+
+.bc-test-gate {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--bc-border);
+  border-radius: 8px;
+  background: var(--bc-surface);
+}
+
+.bc-test-gate h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.bc-test-gate p {
+  margin: 4px 0 0;
+  color: var(--bc-muted);
+  font-size: 12px;
+}
+
+.bc-test-gate ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px 16px;
+  margin: 4px 0;
+  padding-left: 18px;
+  color: var(--bc-muted);
+  font-size: 12px;
+}
+
+.bc-test-gate li[data-ready="true"] {
+  color: var(--bc-success);
+}
+
+.bc-inbox-shop-binding {
+  overflow-wrap: anywhere;
+}
+
+.bc-inbox-setup {
+  padding-top: 10px;
+  border-top: 1px solid var(--bc-border);
+}
+
+.bc-inbox-setup h3 {
+  margin: 0;
+  color: var(--bc-heading);
+  font-size: 13px;
+}
+
+.bc-inbox-setup ol {
+  display: grid;
+  gap: 7px;
+  margin: 8px 0;
+  padding-left: 20px;
+  color: var(--bc-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.bc-inbox-setup code {
+  color: var(--bc-heading);
+  font-size: 0.95em;
+  overflow-wrap: anywhere;
+}
+
+.bc-button,
+.bc-reply-mode button {
+  padding: var(--bc-control-padding);
+  border: 1px solid var(--bc-border);
+  border-radius: 6px;
+  color: var(--bc-text);
+  background: var(--bc-secondary-button);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.bc-button-primary {
+  border-color: var(--bc-primary);
+  color: var(--bc-primary-contrast) !important;
+  background: var(--bc-primary);
+}
+
+.bc-inbox-shell {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.34fr) minmax(0, 1fr);
+  min-height: 620px;
+  overflow: hidden;
+  border: 1px solid var(--bc-border);
+  border-radius: 10px;
+  background: var(--bc-surface);
+}
+
+.bc-conversation-list {
+  padding: 14px;
+  border-right: 1px solid var(--bc-border);
+  background: var(--bc-surface-muted);
+}
+
+.bc-conversation-list h2 {
+  margin: 4px 4px 12px;
+  font-size: 16px;
+}
+
+.bc-conversation {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--bc-text) !important;
+  text-decoration: none;
+}
+
+.bc-conversation + .bc-conversation {
+  margin-top: 4px;
+}
+
+.bc-conversation:hover,
+.bc-conversation.is-selected {
+  border-color: var(--bc-border);
+  background: var(--bc-surface);
+}
+
+.bc-conversation-top strong {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bc-conversation-phone,
+.bc-conversation-bottom {
+  color: var(--bc-muted);
+  font-size: 12px;
+}
+
+.bc-conversation-bottom time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bc-unread-count {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--bc-primary-contrast);
+  background: var(--bc-primary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.bc-message-panel {
+  display: grid;
+  grid-template-rows: auto minmax(240px, 1fr) auto auto;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bc-surface);
+}
+
+.bc-message-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--bc-border);
+  background: var(--bc-surface);
+}
+
+.bc-message-header h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.bc-message-history {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 240px;
+  max-height: 520px;
+  overflow-y: auto;
+  padding: 20px;
+  background: var(--bc-bg);
+}
+
+.bc-message {
+  width: fit-content;
+  max-width: min(78%, 560px);
+  padding: 10px 12px;
+  border: 1px solid var(--bc-border);
+  border-radius: 10px;
+  color: var(--bc-text);
+  background: var(--bc-surface);
+  overflow-wrap: anywhere;
+}
+
+.bc-message-outbound {
+  align-self: flex-end;
+  border-color: var(--bc-success-border);
+  color: var(--bc-text);
+  background: var(--bc-success-bg);
+}
+
+.bc-message-kind {
+  color: var(--bc-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.bc-message p {
+  margin: 5px 0 8px;
+  color: var(--bc-text);
+  white-space: pre-wrap;
+}
+
+.bc-message footer {
+  justify-content: flex-start;
+  color: var(--bc-muted);
+  font-size: 10px;
+}
+
+.bc-delivery-status {
+  color: var(--bc-muted);
+  font-weight: 600;
+}
+
+.bc-status-demo,
+.bc-status-whatsapp {
+  border: 1px solid var(--bc-border);
+  color: var(--bc-text);
+  background: var(--bc-surface-muted);
+}
+
+.bc-message-kind,
+.bc-message footer,
+.bc-message footer time,
+.bc-conversation-phone,
+.bc-conversation-bottom,
+.bc-message-header p {
+  color: var(--bc-muted);
+}
+
+.bc-inbox-notice,
+.bc-inbox-error,
+.bc-inbox-success,
+.bc-inbox-hint {
+  margin: 0 16px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.bc-inbox-notice,
+.bc-inbox-hint {
+  color: var(--bc-muted);
+  background: var(--bc-surface-muted);
+}
+
+.bc-inbox-error {
+  color: var(--bc-danger);
+  background: var(--bc-danger-bg);
+}
+
+.bc-inbox-success {
+  color: var(--bc-success);
+  background: var(--bc-success-bg);
+}
+
+.bc-reply-form {
+  display: grid;
+  gap: 9px;
+  padding: 16px 16px 22px;
+  border-top: 1px solid var(--bc-border);
+  background: var(--bc-surface);
+}
+
+.bc-reply-form label {
+  color: var(--bc-heading);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.bc-reply-form input[type="tel"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--bc-control-padding);
+  border: 1px solid var(--bc-border);
+  border-radius: 6px;
+  color: var(--bc-text);
+  background: var(--bc-surface);
+  font: inherit;
+}
+
+.bc-reply-form textarea,
+.bc-reply-form select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--bc-control-padding);
+  border: 1px solid var(--bc-border);
+  border-radius: 6px;
+  color: var(--bc-text);
+  background: var(--bc-surface);
+  font: inherit;
+}
+
+.bc-reply-form textarea {
+  resize: vertical;
+}
+
+.bc-reply-form textarea::placeholder {
+  color: var(--bc-placeholder);
+  opacity: 1;
+}
+
+.bc-reply-form textarea:focus-visible,
+.bc-reply-form select:focus-visible,
+.bc-reply-form input:focus-visible {
+  outline: 2px solid var(--bc-focus);
+  outline-offset: 2px;
+}
+
+.bc-marketing-opt-in {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.bc-marketing-opt-in input {
+  margin-top: 2px;
+}
+
+.bc-reply-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.bc-reply-mode button[aria-pressed="true"] {
+  border-color: var(--bc-primary);
+  color: var(--bc-primary-contrast);
+  background: var(--bc-primary);
+}
+
+.bc-inbox-empty {
+  align-self: center;
+  justify-self: center;
+  padding: 24px;
+  color: var(--bc-muted);
+  text-align: center;
+}
+
+.bc-inbox-empty h2 {
+  color: var(--bc-heading);
+}
+
 @media (max-width: 640px) {
   .bc-shell-header {
     padding-right: 16px;
@@ -302,5 +687,25 @@ dialog.bc-dialog::backdrop {
 
   .bc-footer {
     padding: 16px;
+  }
+
+  .bc-inbox-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .bc-conversation-list {
+    max-height: 240px;
+    overflow-y: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--bc-border);
+  }
+
+  .bc-inbox-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .bc-message {
+    max-width: 90%;
   }
 }

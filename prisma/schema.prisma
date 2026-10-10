@@ -10,25 +10,25 @@ generator client {
 // See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
   provider = "sqlite"
-  url      = "file:dev.sqlite"
+  url      = env("DATABASE_URL")
 }
 
 model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
 }
@@ -74,4 +74,59 @@ model CampaignDraft {
   updatedAt  DateTime @updatedAt
 
   @@index([shop, updatedAt])
+}
+
+model WhatsAppConversation {
+  id            String            @id @default(cuid())
+  shop          String
+  phoneNumber   String
+  customerName  String?
+  lastMessageAt DateTime          @default(now())
+  lastInboundAt DateTime?
+  unreadCount   Int               @default(0)
+  isDemo        Boolean           @default(false)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  messages      WhatsAppMessage[]
+
+  @@unique([shop, phoneNumber])
+  @@index([shop, lastMessageAt])
+}
+
+model WhatsAppMessage {
+  id                String               @id @default(cuid())
+  conversationId    String
+  shop              String
+  direction         String
+  type              String
+  text              String
+  status            String
+  whatsappMessageId String?
+  clientRequestId   String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  conversation      WhatsAppConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([shop, whatsappMessageId])
+  @@unique([shop, clientRequestId])
+  @@index([conversationId, createdAt])
+  @@index([shop, createdAt])
+}
+
+model WhatsAppMessageStatusEvent {
+  id                String   @id @default(cuid())
+  shop              String
+  whatsappMessageId String
+  status            String
+  eventAt           DateTime
+  receivedAt        DateTime @default(now())
+
+  @@unique([shop, whatsappMessageId, status])
+  @@index([shop, whatsappMessageId])
+}
+
+model WhatsAppWebhookVerification {
+  shop          String   @id
+  phoneNumberId String
+  verifiedAt    DateTime @default(now())
 }

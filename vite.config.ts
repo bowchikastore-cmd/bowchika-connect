@@ -1,6 +1,16 @@
 import { reactRouter } from "@react-router/dev/vite";
-import { defineConfig, type UserConfig } from "vite";
+import { defineConfig, loadEnv, type UserConfig } from "vite";
 import tsconfigPaths from "vite-tsconfig-paths";
+
+const serverEnvironment = loadEnv(
+  process.env.NODE_ENV || "development",
+  process.cwd(),
+  ["WHATSAPP_", "META_APP_SECRET", "META_GRAPH_API_VERSION"],
+);
+
+for (const [key, value] of Object.entries(serverEnvironment)) {
+  if (process.env[key] === undefined) process.env[key] = value;
+}
 
 // Related: https://github.com/remix-run/remix/issues/2835#issuecomment-1144102176
 // Replace the HOST env var with SHOPIFY_APP_URL so that it doesn't break the Vite server.

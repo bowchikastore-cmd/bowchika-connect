@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
@@ -8,6 +8,11 @@ import type {
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import prisma from "../db.server";
+import {
+  getWhatsAppBusinessAccountId,
+  getWhatsAppConfig,
+  WhatsAppConfigurationError,
+} from "../whatsapp.server";
 
 type ShopifyCustomer = {
   id: string;
@@ -123,22 +128,16 @@ class MetaRequestError extends Error {
   }
 }
 
-class MetaConfigurationError extends Error {}
-
 const getMetaConfig = (): MetaConfig => {
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
-  const businessAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID?.trim();
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN?.trim();
-  const apiVersion = process.env.META_GRAPH_API_VERSION?.trim() || "v23.0";
-
-  if (!phoneNumberId || !businessAccountId || !accessToken) {
-    throw new MetaConfigurationError("WhatsApp credentials are not configured.");
-  }
-  if (!/^v\d+\.\d+$/.test(apiVersion)) {
-    throw new MetaConfigurationError("The Meta Graph API version is invalid.");
+  const config = getWhatsAppConfig();
+  const businessAccountId = getWhatsAppBusinessAccountId();
+  if (!businessAccountId) {
+    throw new WhatsAppConfigurationError(
+      "WhatsApp Business Account ID is not configured.",
+    );
   }
 
-  return { phoneNumberId, businessAccountId, accessToken, apiVersion };
+  return { ...config, businessAccountId };
 };
 
 const metaGet = async <T,>(
@@ -177,7 +176,7 @@ const metaGet = async <T,>(
 };
 
 const metaActionError = (error: unknown) => {
-  if (error instanceof MetaConfigurationError) return error.message;
+  if (error instanceof WhatsAppConfigurationError) return error.message;
   if (error instanceof MetaRequestError) {
     if (error.code === 190) return "Meta rejected the access token. Check that it is active.";
     if (error.code === 10 || error.code === 200) {
@@ -189,12 +188,15 @@ const metaActionError = (error: unknown) => {
   return "The WhatsApp operation could not be completed. Please try again.";
 };
 
-const hasMetaConfiguration = () =>
-  Boolean(
-    process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() &&
-      process.env.WHATSAPP_BUSINESS_ACCOUNT_ID?.trim() &&
-      process.env.WHATSAPP_ACCESS_TOKEN?.trim(),
-  );
+const hasMetaConfiguration = () => {
+  try {
+    getMetaConfig();
+    return true;
+  } catch (error) {
+    if (error instanceof WhatsAppConfigurationError) return false;
+    throw error;
+  }
+};
 
 const orderRules = new Set(["any", "zero", "one", "has", "repeat"]);
 const spendRules = new Set(["any", "atLeast", "under"]);
@@ -205,6 +207,8 @@ const textField = (formData: FormData, key: string) =>
 
 const actionResult = (body: object, status = 200) =>
   Response.json(body, { status });
+
+const CUSTOMER_QUERY_TIMEOUT_MS = 15_000;
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
@@ -254,13 +258,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             }
           }
         }`,
+      { signal: AbortSignal.timeout(CUSTOMER_QUERY_TIMEOUT_MS) },
     );
 
     const result = (await response.json()) as CustomerQueryResult;
     const graphQLErrors = result.errors ?? [];
 
     if (graphQLErrors.length) {
-      console.error("Shopify customer query errors:", graphQLErrors);
+      console.error("Shopify customer query returned GraphQL errors.");
       return {
         customers: [] as ShopifyCustomer[],
         savedSegments,
@@ -268,7 +273,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         campaignDrafts,
         whatsappConfigured: hasMetaConfiguration(),
         customerError:
-          "Shopify returned an error while loading customers. Check the development server terminal.",
+            "Shopify returned an error while loading customers. Retry the request or check the server logs.",
       };
     }
 
@@ -297,7 +302,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       customerError: null,
     };
   } catch (error) {
-    console.error("Failed to load Shopify customers:", error);
+    const timedOut =
+      error instanceof Error &&
+      (error.name === "TimeoutError" || error.name === "AbortError");
+    console.error(
+      timedOut
+        ? "Shopify customer query timed out."
+        : "Shopify customer query failed.",
+    );
     return {
       customers: [] as ShopifyCustomer[],
       savedSegments,
@@ -305,7 +317,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       campaignDrafts,
       whatsappConfigured: hasMetaConfiguration(),
       customerError:
-        "Could not load customers from Shopify. Check the development server terminal.",
+        timedOut
+          ? "Shopify customer loading timed out after 15 seconds. Check the connection and retry."
+          : "Could not load customers from Shopify. Check the connection and retry.",
     };
   }
 };
@@ -628,6 +642,7 @@ export default function Index() {
     campaignDrafts,
     whatsappConfigured,
   } = useLoaderData<typeof loader>();
+  const revalidator = useRevalidator();
   const saveSegmentFetcher = useFetcher<SegmentActionData>();
   const deleteSegmentFetcher = useFetcher<SegmentActionData>();
   const campaignPreviewFetcher = useFetcher<CampaignPreviewActionData>();
@@ -776,6 +791,9 @@ export default function Index() {
           <h1 style={{ fontSize: 24, margin: "8px 0" }}>Your customers. Your campaigns.</h1>
           <p style={{ margin: 0, color: "var(--bc-muted)" }}>Customer conversations. Made simpler.</p>
           <div style={{ marginTop: 12, fontSize: 12, color: "var(--bc-warning)" }}>DEVELOPMENT MODE · Messages are not sent</div>
+          <div style={{ marginTop: 8, fontSize: 12, color: "var(--bc-muted)" }}>
+            Showing up to the 100 most recently created customers. Segment counts use this loaded set.
+          </div>
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 20 }}>
@@ -794,7 +812,7 @@ export default function Index() {
             <h2 style={{ fontSize: 20 }}>Campaign overview</h2>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBottom: 20 }}>
               {[
-                [String(shopifyCustomers.length), "Customers loaded", "Live from this development store"],
+                [String(shopifyCustomers.length), "Customers loaded", "Recent records from the connected Shopify store"],
                 ["—", "Messages sent", "Meta connection not configured"],
                 ["—", "Delivery rate", "Requires Meta delivery webhooks"],
                 ["—", "Ecosystem errors", "Requires Meta delivery webhooks"],
@@ -820,8 +838,20 @@ export default function Index() {
         {tab === "Customers" && (
           <>
             <h2 style={{ fontSize: 20 }}>Customer audience</h2>
-            <p style={muted}>Live customer records from the connected development store. WhatsApp consent is not verified by this list.</p>
-            {customerError && <div style={{ ...cardStyle, color: "var(--bc-danger)", marginBottom: 12 }}>{customerError}</div>}
+            <p style={muted}>Live customer records from the connected Shopify store (up to the 100 most recently created). WhatsApp consent is not verified by this list.</p>
+            {customerError && (
+              <div role="alert" style={{ ...cardStyle, color: "var(--bc-danger)", marginBottom: 12 }}>
+                <p style={{ marginTop: 0 }}>{customerError}</p>
+                <button
+                  type="button"
+                  style={buttonStyle}
+                  disabled={revalidator.state !== "idle"}
+                  onClick={() => revalidator.revalidate()}
+                >
+                  {revalidator.state === "idle" ? "Retry customer load" : "Retrying…"}
+                </button>
+              </div>
+            )}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
               <input placeholder="Search name, email, phone or tag" value={search} onChange={(event) => setSearch(event.target.value)} style={{ ...inputStyle, flex: 1, minWidth: 220, marginTop: 0 }} />
               <button style={buttonStyle} onClick={() => setSelected(filteredCustomers.map((customer) => customer.id))}>Select all shown</button>

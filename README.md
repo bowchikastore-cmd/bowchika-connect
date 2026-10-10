@@ -79,11 +79,29 @@ For more information on the Shopify Dev MCP please read [the documentation](http
 
 ### Application Storage
 
-This template uses [Prisma](https://www.prisma.io/) to store session data, by default using an [SQLite](https://www.sqlite.org/index.html) database.
-The database is defined as a Prisma schema in `prisma/schema.prisma`.
+This app uses [Prisma](https://www.prisma.io/) for Shopify sessions, customer segments, templates, campaign drafts, and Inbox records. Local development keeps the existing SQLite schema at `prisma/schema.prisma`, using `DATABASE_URL=file:dev.sqlite` from `.env.example` and the ignored local `.env`.
 
-This use of SQLite works in production if your app runs as a single instance.
-The database that works best for you depends on the data your app needs and how it is queried.
+### Render Free + Neon Free evaluation
+
+`render.yaml` prepares a $0 Render Free Node web service. Render's [official Free instance limits](https://render.com/docs/free) say Free web services sleep after 15 minutes without inbound traffic and take about one minute to wake, have an ephemeral filesystem, receive 750 Free instance hours per workspace per calendar month, and are explicitly not intended for production apps. No local SQLite file is used by this deployment. `render.yaml` uses Neon PostgreSQL; **do not change it to `DATABASE_URL=file:...`**.
+
+Neon's [official Free plan limits](https://neon.com/docs/introduction/plans#free-plan) currently include 100 compute-hours per project, 1 GB Postgres storage per project (20 GB total per account), 5 GB public network transfer per project, and automatic scale-to-zero after five minutes. This plan has no uptime SLA. Database cold starts can also add latency. Check both providers' current limits before relying on the free tiers; if limits are exceeded, services may be suspended or require an upgrade, which would no longer meet the $0/month requirement.
+
+The Render/Neon pairing is technically prepared for a **non-critical pilot only**, not dependable production: Render cold sleep can delay the first Shopify page request and a Meta webhook request by about a minute. If a webhook request arrives during sleep, Render's wake-up response may be returned before the app handler runs; in that case the event is not persisted by this app. A later Meta retry may deliver it after wake-up, but do not rely on retry timing or use this for time-sensitive inbound customer support. When the handler runs, it persists before acknowledging. Neon can independently take several seconds to wake. Do not rely on this $0 setup for unattended availability.
+
+### Separate PostgreSQL schema and safe data migration
+
+`prisma/postgresql/schema.prisma` and `prisma/postgresql/migrations/` are a separate PostgreSQL schema and baseline migration. They preserve the current models, including the Shopify `Session` model required by `PrismaSessionStorage`, and do not alter the SQLite migration history. The Render build generates the PostgreSQL Prisma Client from this schema; the Render start command deploys only its PostgreSQL migrations. Local development and the existing SQLite database remain separate.
+
+The baseline migration creates an **empty schema only**. It has not been applied to Neon and does not copy local data. Do not use `migrate reset`, `db push`, or apply the SQLite SQL migrations to PostgreSQL. Before any future data move, make and verify a separate SQLite backup, provision a fresh/empty Neon database, apply the PostgreSQL baseline, then perform a reviewed copy with source and destination row-count/foreign-key checks. Keep the SQLite file and its migration history untouched until the copied data is verified. Development Shopify `Session` rows contain dev-store credentials and must not be copied as production sessions. Any required live-shop rows need an explicit shop/data review; synced templates can instead be re-synced from Meta after production access is configured. No data copy is included in this task.
+
+### Manual Render and Neon setup (not performed here)
+
+1. Create a Neon Free project and database. Choose a region close to the Render service. From Neon's **Connect** dialog copy both URLs: the **pooled** URL (hostname includes `-pooler`) for `DATABASE_URL`, and the direct/unpooled URL for `DATABASE_URL_UNPOOLED`. Keep Neon's TLS parameters as supplied. These are entered only in Render's environment settings; never commit them.
+2. Connect the repository to Render and create a Blueprint from `render.yaml`. It prompts for `SHOPIFY_APP_URL`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, both Neon URLs, and the existing WhatsApp secret values declared with `sync: false`. `SHOPIFY_APP_URL` must be the actual HTTPS Render service origin shown after service creation; it is intentionally not guessed here. Keep `WHATSAPP_TEST_SENDING_ENABLED` unset/false and never add a live or campaign sending switch.
+3. The first deploy applies the PostgreSQL baseline to Neon. This creates schema but does not migrate any SQLite rows. Verify logs, tables, and app health before connecting any live Shopify configuration.
+4. Only after Render gives the actual service URL and the correct production Shopify app credentials are available, create/select a separate Shopify production app configuration with that origin and the correct OAuth callback URL. The current `shopify.app.toml` stays the development config; its `example.com` placeholder is intentionally not replaced with `bowchika.in`, which is the storefront domain, not a confirmed app host.
+5. Do not change Meta webhook subscriptions or callback URLs until the permanent host is running and explicitly approved. Pabbly and Shiprocket are not part of this deployment configuration.
 Here’s a short list of databases providers that provide a free tier to get started:
 
 | Database   | Type             | Hosters                                                                                                                                                                                                                                    |
@@ -235,3 +253,43 @@ Shopify:
 Internationalization:
 
 - [Internationalizing your app](https://shopify.dev/docs/apps/best-practices/internationalization/getting-started)
+
+## WhatsApp Inbox
+
+The Inbox is available at **Inbox** in the embedded app navigation. It stores shop-scoped conversations and message history in Prisma. **Add sample conversation** creates a local-only demo record; sending a reply in a demo conversation never calls Meta.
+
+General/live sending is not enabled. A separately gated personal-phone test path is disabled unless `WHATSAPP_TEST_SENDING_ENABLED=true` is explicitly set. It also requires one exact shop binding and one allow-listed recipient, a successful Meta GET webhook verification, and a signed inbound message from that same recipient. It cannot send to other conversation numbers or launch campaigns. The current server-environment credential model supports one configured shop/WhatsApp phone-number pairing per deployment; do not bind or move the Cloud API number.
+
+The existing environment already uses `META_APP_ID` and `META_APP_SECRET`; webhook signature validation reuses `META_APP_SECRET` (do not create a duplicate app-secret variable). The existing Cloud API credential names are:
+
+- `WHATSAPP_PHONE_NUMBER_ID` and `WHATSAPP_ACCESS_TOKEN` for the WhatsApp Cloud API.
+- `WHATSAPP_BUSINESS_ACCOUNT_ID` for checking the subscribed business account.
+- `META_APP_SECRET` for Meta `X-Hub-Signature-256` validation.
+- `WHATSAPP_WEBHOOK_VERIFY_TOKEN` for Meta's initial webhook verification challenge.
+- `WHATSAPP_SHOP_DOMAIN` set to the one bound shop's exact `*.myshopify.com` domain.
+- `WHATSAPP_TEST_RECIPIENT_PHONE` set to your own test phone in E.164 form (for example `+15551234567`).
+- `WHATSAPP_TEST_SENDING_ENABLED=true` only after webhook verification and a real inbound message from that allow-listed phone; leave it unset/false otherwise.
+- Optionally, `META_GRAPH_API_VERSION` (defaults to `v23.0`).
+
+The configured shop must exactly match the shop returned by Shopify authentication (`session.shop`). The Inbox shows both domains and reports a mismatch separately from a missing variable. It never substitutes a development shop for another configured shop; authenticate the app on the intended store before expecting the binding check to pass. After editing `.env`, restart `shopify app dev` so the server reads the updated environment.
+
+Vite explicitly loads the WhatsApp/Meta server settings from the active `.env` files into the Node server process. These variables are not prefixed with `VITE_` and are not exposed to browser code. An inherited shell/server value takes precedence over the file.
+
+The development environment may also require the existing Shopify app variables `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, and `SHOPIFY_APP_URL`. Keep every credential in the hosting provider's secret manager or ignored local `.env`; do not commit them or expose them to browser code. The Inbox enforces the 24-hour customer-service window for free-form replies, checks body parameter counts against the synced approved template components, and requires an explicit opt-in confirmation for marketing templates. Shopify email consent is not WhatsApp consent. Meta API errors are surfaced without logging credentials.
+
+### Migration and webhook setup
+
+Apply the additive migration without resetting the existing database:
+
+```sh
+npx prisma migrate deploy
+npx prisma generate
+```
+
+The additive migrations add Inbox conversations, messages, idempotency keys, status-event receipts, and webhook-verification records. They preserve existing tables, migration history, and data.
+
+For inbound traffic, open **Meta for Developers → your app → WhatsApp → Configuration** and set the callback URL to `https://<current-public-dev-tunnel-host>/webhooks/whatsapp`; enter the value already held in `WHATSAPP_WEBHOOK_VERIFY_TOKEN` and verify it. Subscribe the WhatsApp Business Account to the `messages` webhook field, and ensure that WABA is subscribed to this app (the Graph API subscription operation, if needed, is `POST /<WABA_ID>/subscribed_apps`). In development mode, add and verify your personal phone as an allowed test recipient in WhatsApp API Setup if Meta requires it. Do not change or migrate either WhatsApp number.
+
+Meta GET verification is recorded only after the configured shop, phone ID, WABA ID, token, and app secret all validate. POST events must contain a valid `X-Hub-Signature-256` signed using the existing `META_APP_SECRET`, and must match both configured WABA and phone-number IDs. Use the HTTPS host printed by the running `shopify app dev` command; the dev process and its tunnel must remain running, and a restarted development tunnel can have a different URL. Do not use the placeholder `https://example.com` in `shopify.app.toml`. No real Meta send/receive integration is claimed until Meta verification and an actual inbound test message have succeeded.
+
+The Shopify Admin Sidekick/assistant bar is rendered outside this app, so this theme's CSS cannot style or move it. Inbox polling refreshes conversations and delivery statuses every 30 seconds while the page is visible, and refreshes when returning to the tab.
