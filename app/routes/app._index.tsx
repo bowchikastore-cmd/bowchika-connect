@@ -61,6 +61,26 @@ type SavedSegment = {
   lastOrderDays: number | null;
 };
 
+type SegmentCount = { count: number | null; error?: string };
+
+const escapeShopifySearch = (value: string) => value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+
+const buildSegmentCustomerQuery = (segment: SavedSegment) => {
+  const terms: string[] = [];
+  if (segment.orderRule === "zero") terms.push("orders_count:0");
+  if (segment.orderRule === "one") terms.push("orders_count:1");
+  if (segment.orderRule === "has") terms.push("orders_count:>0");
+  if (segment.orderRule === "repeat") terms.push("orders_count:>=2");
+  if (segment.tag.trim()) terms.push(`tag:"${escapeShopifySearch(segment.tag.trim())}"`);
+  if (segment.spendRule === "atLeast" && segment.spendAmount !== null) terms.push(`total_spent:>=${segment.spendAmount}`);
+  if (segment.spendRule === "under" && segment.spendAmount !== null) terms.push(`total_spent:<${segment.spendAmount}`);
+  if (segment.lastOrderDays !== null) {
+    const cutoff = new Date(Date.now() - segment.lastOrderDays * 86400000).toISOString().slice(0, 10);
+    terms.push(`last_order_date:>=${cutoff}`);
+  }
+  return terms.join(" AND ");
+};
+
 type SegmentActionData = {
   error?: string;
   success?: string;
@@ -71,6 +91,7 @@ type CampaignPreviewActionData = {
   success?: string;
   segmentName?: string;
   segmentId?: string;
+  matchingCustomerCount?: number | null;
 };
 
 type CampaignDraftActionData = {
@@ -274,6 +295,28 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     if (!countResult.errors?.length && typeof countResult.data?.customersCount?.count === "number") totalCustomerCount = countResult.data.customersCount.count;
   } catch { /* Keep the customer table usable if the separate total-count request fails. */ }
 
+  const segmentCounts: Record<string, SegmentCount> = {};
+  await Promise.all(savedSegments.map(async (segment) => {
+    try {
+      const query = buildSegmentCustomerQuery(segment);
+      const response = await admin.graphql(
+        `#graphql
+          query BowchikaConnectSegmentCount($query: String) {
+            customersCount(limit: 10000, query: $query) { count precision }
+          }`,
+        { variables: { query: query || null }, signal: AbortSignal.timeout(CUSTOMER_QUERY_TIMEOUT_MS) },
+      );
+      const result = await response.json() as { data?: { customersCount?: { count?: number | null; precision?: string } }; errors?: unknown[] };
+      if (result.errors?.length || typeof result.data?.customersCount?.count !== "number") {
+        segmentCounts[segment.id] = { count: null, error: "Shopify could not calculate this segment count." };
+      } else {
+        segmentCounts[segment.id] = { count: result.data.customersCount.count };
+      }
+    } catch {
+      segmentCounts[segment.id] = { count: null, error: "Segment count unavailable. Retry later." };
+    }
+  }));
+
   try {
     const response = await admin.graphql(
       `#graphql
@@ -308,6 +351,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         healthMetrics,
         customerPageInfo: { hasNextPage: false, endCursor: null },
         savedSegments,
+        segmentCounts,
         approvedTemplates,
         campaignDrafts,
         whatsappConfigured: hasMetaConfiguration(),
@@ -341,6 +385,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         endCursor: result.data?.customers?.pageInfo?.endCursor ?? null,
       },
       savedSegments,
+      segmentCounts,
       approvedTemplates,
       campaignDrafts,
       whatsappConfigured: hasMetaConfiguration(),
@@ -361,6 +406,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       healthMetrics,
       customerPageInfo: { hasNextPage: false, endCursor: null },
       savedSegments,
+      segmentCounts,
       approvedTemplates,
       campaignDrafts,
       whatsappConfigured: hasMetaConfiguration(),
@@ -373,7 +419,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = textField(formData, "intent");
 
@@ -546,15 +592,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     const segment = await prisma.customerSegment.findFirst({
       where: { id: segmentId, shop: session.shop },
-      select: { name: true },
+      select: { id: true, name: true, orderRule: true, tag: true, spendRule: true, spendAmount: true, lastOrderDays: true },
     });
     if (!segment) {
       return actionResult({ error: "That saved segment no longer exists. Choose another audience." }, 404);
     }
+    let matchingCustomerCount: number | null = null;
+    try {
+      const query = buildSegmentCustomerQuery(segment);
+      const countResponse = await admin.graphql(
+        `#graphql
+          query BowchikaConnectCampaignAudienceCount($query: String) {
+            customersCount(limit: 10000, query: $query) { count precision }
+          }`,
+        { variables: { query: query || null }, signal: AbortSignal.timeout(CUSTOMER_QUERY_TIMEOUT_MS) },
+      );
+      const countResult = await countResponse.json() as { data?: { customersCount?: { count?: number | null } }; errors?: unknown[] };
+      if (!countResult.errors?.length && typeof countResult.data?.customersCount?.count === "number") matchingCustomerCount = countResult.data.customersCount.count;
+    } catch { /* Return an unavailable count rather than a misleading page-only count. */ }
     return actionResult({
       success: "Campaign preview is ready. No message was sent.",
       segmentName: segment.name,
       segmentId,
+      matchingCustomerCount,
     });
   }
 
@@ -661,26 +721,6 @@ const dateLabel = (date: string | null) => {
   });
 };
 
-const matchesSavedSegment = (customer: ShopifyCustomer, segment: SavedSegment) => {
-  if (segment.orderRule === "zero" && customer.numberOfOrders !== 0) return false;
-  if (segment.orderRule === "one" && customer.numberOfOrders !== 1) return false;
-  if (segment.orderRule === "repeat" && customer.numberOfOrders < 2) return false;
-  if (segment.orderRule === "has" && customer.numberOfOrders < 1) return false;
-  if (
-    segment.tag.trim() &&
-    !customer.tags.some((item) => item.toLowerCase().includes(segment.tag.trim().toLowerCase()))
-  ) return false;
-  if (segment.spendRule === "atLeast" && customer.amountSpent < (segment.spendAmount ?? 0)) return false;
-  if (segment.spendRule === "under" && customer.amountSpent >= (segment.spendAmount ?? 0)) return false;
-
-  if (segment.lastOrderDays !== null) {
-    if (!customer.lastOrderAt) return false;
-    const cutoff = Date.now() - segment.lastOrderDays * 24 * 60 * 60 * 1000;
-    if (new Date(customer.lastOrderAt).getTime() < cutoff) return false;
-  }
-  return true;
-};
-
 export default function Index() {
   const {
     customers: shopifyCustomers,
@@ -688,6 +728,7 @@ export default function Index() {
     healthMetrics,
     customerError,
     savedSegments,
+    segmentCounts,
     approvedTemplates,
     campaignDrafts,
     whatsappConfigured,
@@ -768,9 +809,6 @@ export default function Index() {
   }, [shopifyCustomers, search, activeServerSearch, orderRule, tag, spendRule, spendAmount, lastOrderDays]);
 
   const audienceSegment = savedSegments.find((segment) => segment.id === audienceSegmentId);
-  const audienceCustomerCount = audienceSegment
-    ? shopifyCustomers.filter((customer) => matchesSavedSegment(customer, audienceSegment)).length
-    : 0;
   const canPreviewCampaign = Boolean(audienceSegment && !customerError);
 
   const cardStyle = {
@@ -996,7 +1034,7 @@ export default function Index() {
                 </label>
               </div>
               <div style={{ padding: 14, background: "var(--bc-surface-muted)", borderRadius: 8 }}>
-                <strong>{filteredCustomers.length} customers match</strong>
+                <strong>{activeSegmentId && segmentCounts[activeSegmentId]?.count !== undefined ? (segmentCounts[activeSegmentId]?.count === null ? "Full-store count unavailable" : `${segmentCounts[activeSegmentId]?.count} customers match across the store`) : `${filteredCustomers.length} customers match on this page`}</strong>
                 <p style={{ ...muted, marginBottom: 0 }}>This is a Shopify customer filter preview, not a WhatsApp-eligible audience count. Consent must be verified separately before any marketing send.</p>
               </div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -1022,7 +1060,7 @@ export default function Index() {
             <h3>Saved segments ({savedSegments.length})</h3>
             {savedSegments.length === 0 ? <p className="bc-empty-state">No saved segments in this session yet.</p> : savedSegments.map((segment) => (
               <div key={segment.id} style={{ ...cardStyle, marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", borderColor: activeSegmentId === segment.id ? "var(--bc-primary)" : "var(--bc-border)" }}>
-                <div><strong>{segment.name}</strong><div style={muted}>Order rule: {segment.orderRule} · Tag: {segment.tag || "any"} · Spend: {segment.spendRule === "any" ? "any" : `${segment.spendRule} ${segment.spendAmount}`} · Last order: {segment.lastOrderDays === null ? "any date" : `last ${segment.lastOrderDays} days`}</div></div>
+                <div><strong>{segment.name}</strong><div style={muted}>{segmentCounts[segment.id]?.count === null || segmentCounts[segment.id] === undefined ? "Full-store count unavailable" : `${segmentCounts[segment.id].count} customers across the store`} · Order rule: {segment.orderRule} · Tag: {segment.tag || "any"} · Spend: {segment.spendRule === "any" ? "any" : `${segment.spendRule} ${segment.spendAmount}`} · Last order: {segment.lastOrderDays === null ? "any date" : `last ${segment.lastOrderDays} days`}</div></div>
                 <div style={{ display: "flex", gap: 8 }}><button style={buttonStyle} onClick={() => applySegment(segment)}>Apply</button><deleteSegmentFetcher.Form method="post"><input type="hidden" name="intent" value="delete" /><input type="hidden" name="id" value={segment.id} /><button type="submit" style={buttonStyle} disabled={deleteSegmentFetcher.state !== "idle"}>{deleteSegmentFetcher.state === "idle" ? "Delete" : "Deleting…"}</button></deleteSegmentFetcher.Form></div>
               </div>
             ))}
@@ -1104,7 +1142,7 @@ export default function Index() {
                 <strong>Audience summary</strong>
                 <p style={{ margin: "8px 0 0" }}>
                   {audienceSegment
-                    ? `${audienceSegment.name}: ${audienceCustomerCount} matching Shopify customers in the loaded customer list.`
+                    ? `${audienceSegment.name}: ${segmentCounts[audienceSegment.id]?.count ?? "count unavailable"} matching Shopify customers across the store.`
                     : "Choose a saved segment to see its matching customer count."}
                 </p>
                 {customerError && <p style={{ color: "var(--bc-danger)", marginBottom: 0 }}>Customer records could not be loaded, so a preview is unavailable.</p>}
@@ -1119,7 +1157,7 @@ export default function Index() {
                 </button>
               </campaignPreviewFetcher.Form>
               {campaignPreviewFetcher.data?.error && <div role="alert" style={{ padding: 12, background: "var(--bc-danger-bg)", color: "var(--bc-danger)", borderRadius: 8 }}>{campaignPreviewFetcher.data.error}</div>}
-              {campaignPreviewFetcher.data?.success && campaignPreviewFetcher.data.segmentId === audienceSegmentId && <div role="status" style={{ padding: 12, background: "var(--bc-success-bg)", borderRadius: 8 }}>Preview: “{campaign}” · {approvedTemplates.find((item) => item.id === template)?.name ?? "No template selected"} · Audience: {campaignPreviewFetcher.data.segmentName} ({audienceCustomerCount} matching Shopify customers) · Preview only. No message sent.</div>}
+              {campaignPreviewFetcher.data?.success && campaignPreviewFetcher.data.segmentId === audienceSegmentId && <div role="status" style={{ padding: 12, background: "var(--bc-success-bg)", borderRadius: 8 }}>Preview: “{campaign}” · {approvedTemplates.find((item) => item.id === template)?.name ?? "No template selected"} · Audience: {campaignPreviewFetcher.data.segmentName} ({campaignPreviewFetcher.data.matchingCustomerCount ?? "count unavailable"} matching Shopify customers) · Preview only. No message sent.</div>}
             </div>
             <h3>Saved campaign drafts ({campaignDrafts.length})</h3>
             {campaignDrafts.length === 0 ? <p className="bc-empty-state">No saved campaign drafts yet.</p> : campaignDrafts.map((draft) => (
