@@ -1,0 +1,44 @@
+name: App checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "fix/**"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: file:./dev.sqlite
+      SHOPIFY_API_KEY: ci-placeholder-key
+      SHOPIFY_API_SECRET: ci-placeholder-secret
+      SCOPES: read_customers,read_orders
+      SHOPIFY_APP_URL: https://example.invalid
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --include=dev
+      - name: Generate Prisma client
+        run: npx prisma generate --schema prisma/schema.prisma
+      - name: Apply local test schema
+        run: npx prisma migrate deploy --schema prisma/schema.prisma
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: WhatsApp safety and webhook tests
+        run: npx vite-node app/whatsapp-safety.test.mjs
+      - name: Production build
+        run: npm run build
