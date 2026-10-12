@@ -246,6 +246,28 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
   ]);
 
+  const [outboundMessageCount, deliveredMessageCount, readMessageCount, failedMessageCount, recentStatusEvents, webhookVerification] = await Promise.all([
+    prisma.whatsAppMessage.count({ where: { shop: session.shop, direction: "OUTBOUND" } }),
+    prisma.whatsAppMessage.count({ where: { shop: session.shop, direction: "OUTBOUND", status: { in: ["DELIVERED", "READ"] } } }),
+    prisma.whatsAppMessage.count({ where: { shop: session.shop, direction: "OUTBOUND", status: "READ" } }),
+    prisma.whatsAppMessage.count({ where: { shop: session.shop, direction: "OUTBOUND", status: "FAILED" } }),
+    prisma.whatsAppMessageStatusEvent.count({ where: { shop: session.shop, receivedAt: { gte: new Date(Date.now() - 86400000) } } }),
+    prisma.whatsAppWebhookVerification.findUnique({ where: { shop: session.shop }, select: { verifiedAt: true, phoneNumberId: true } }),
+  ]);
+  const healthMetrics = {
+    outboundMessageCount, deliveredMessageCount, readMessageCount, failedMessageCount, recentStatusEvents,
+    webhookVerified: Boolean(webhookVerification),
+    webhookVerifiedAt: webhookVerification ? webhookVerification.verifiedAt.toISOString() : null,
+    webhookPhoneMatches: Boolean(webhookVerification && webhookVerification.phoneNumberId === (process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim()),
+    approvedTemplateCount: approvedTemplates.length, savedSegmentCount: savedSegments.length, campaignDraftCount: campaignDrafts.length,
+  };
+  let totalCustomerCount: number | null = null;
+  try {
+    const countResponse = await admin.graphql("#graphql\nquery BowchikaConnectCustomerCount { customersCount(limit: 10000) { count precision } }", { signal: AbortSignal.timeout(CUSTOMER_QUERY_TIMEOUT_MS) });
+    const countResult = await countResponse.json() as { data?: { customersCount?: { count?: number | null } }; errors?: unknown[] };
+    if (!countResult.errors?.length && typeof countResult.data?.customersCount?.count === "number") totalCustomerCount = countResult.data.customersCount.count;
+  } catch { /* Keep the customer table usable if the separate total-count request fails. */ }
+
   try {
     const response = await admin.graphql(
       `#graphql
@@ -276,6 +298,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       console.error("Shopify customer query returned GraphQL errors.");
       return {
         customers: [] as ShopifyCustomer[],
+        totalCustomerCount,
+        healthMetrics,
         customerPageInfo: { hasNextPage: false, endCursor: null },
         savedSegments,
         approvedTemplates,
@@ -304,6 +328,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     return {
       customers,
+      totalCustomerCount,
+      healthMetrics,
       customerPageInfo: {
         hasNextPage: Boolean(result.data?.customers?.pageInfo?.hasNextPage),
         endCursor: result.data?.customers?.pageInfo?.endCursor ?? null,
@@ -325,6 +351,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     );
     return {
       customers: [] as ShopifyCustomer[],
+      totalCustomerCount,
+      healthMetrics,
       customerPageInfo: { hasNextPage: false, endCursor: null },
       savedSegments,
       approvedTemplates,
@@ -650,6 +678,8 @@ const matchesSavedSegment = (customer: ShopifyCustomer, segment: SavedSegment) =
 export default function Index() {
   const {
     customers: shopifyCustomers,
+    totalCustomerCount,
+    healthMetrics,
     customerError,
     savedSegments,
     approvedTemplates,
@@ -809,7 +839,7 @@ export default function Index() {
           <p style={{ margin: 0, color: "var(--bc-muted)" }}>Customer conversations. Made simpler.</p>
           <div style={{ marginTop: 12, fontSize: 12, color: "var(--bc-warning)" }}>DEVELOPMENT MODE · Messages are not sent</div>
           <div style={{ marginTop: 8, fontSize: 12, color: "var(--bc-muted)" }}>
-            Showing 100 customers per page. Segment counts and campaign previews use the currently loaded page only; they are not whole-store audience totals.
+            Showing {shopifyCustomers.length} customers on this page. Total store count is shown separately; filters currently apply to the loaded page.
           </div>
         </div>
 
@@ -829,10 +859,10 @@ export default function Index() {
             <h2 style={{ fontSize: 20 }}>Campaign overview</h2>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBottom: 20 }}>
               {[
-                [String(shopifyCustomers.length), "Customers loaded", "Recent records from the connected Shopify store"],
-                ["—", "Messages sent", "Meta connection not configured"],
-                ["—", "Delivery rate", "Requires Meta delivery webhooks"],
-                ["—", "Ecosystem errors", "Requires Meta delivery webhooks"],
+                [totalCustomerCount === null ? String(shopifyCustomers.length) : totalCustomerCount.toLocaleString("en-IN"), "Total Shopify customers", totalCustomerCount === null ? "Total count unavailable; showing this page count" : "Across the connected Shopify store"],
+                [String(healthMetrics.outboundMessageCount), "Outbound messages", "Messages recorded by Bowchika Connect"],
+                [healthMetrics.outboundMessageCount ? String(Math.round((healthMetrics.deliveredMessageCount / healthMetrics.outboundMessageCount) * 100)) + "%" : "—", "Delivered rate", "Delivered or read among recorded outbound messages"],
+                [String(healthMetrics.failedMessageCount), "Failed messages", "Recorded outbound failures"],
               ].map(([value, label, description]) => (
                 <div key={label} style={cardStyle}>
                   <div style={muted}>{label}</div><div style={{ fontSize: 28, fontWeight: 700, margin: "10px 0" }}>{value}</div><div style={muted}>{description}</div>
@@ -840,6 +870,18 @@ export default function Index() {
               ))}
             </div>
             {customerError && <p style={{ color: "var(--bc-danger)" }}>{customerError}</p>}
+            <div style={{ ...cardStyle, marginBottom: 16 }}>
+              <h3 style={{ marginTop: 0 }}>Delivery health</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+                <div><strong>{healthMetrics.webhookVerified && healthMetrics.webhookPhoneMatches ? "Verified" : "Needs attention"}</strong><div style={muted}>Meta webhook verification</div></div>
+                <div><strong>{healthMetrics.recentStatusEvents}</strong><div style={muted}>Status events in last 24 hours</div></div>
+                <div><strong>{healthMetrics.readMessageCount}</strong><div style={muted}>Read receipts recorded</div></div>
+                <div><strong>{healthMetrics.approvedTemplateCount}</strong><div style={muted}>Approved templates synced</div></div>
+                <div><strong>{healthMetrics.savedSegmentCount}</strong><div style={muted}>Saved customer segments</div></div>
+                <div><strong>{healthMetrics.campaignDraftCount}</strong><div style={muted}>Campaign drafts saved</div></div>
+              </div>
+              <p style={muted}>These metrics include records stored by Bowchika Connect only, not messages sent outside this app.</p>
+            </div>
             <div style={cardStyle}>
               <h3 style={{ marginTop: 0 }}>Quick actions</h3>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -855,7 +897,16 @@ export default function Index() {
         {tab === "Customers" && (
           <>
             <h2 style={{ fontSize: 20 }}>Customer audience</h2>
-            <p style={muted}>Live customer records from Shopify, newest first. Browse pages to reach older customers. Filters and counts apply to the current page; WhatsApp consent is not verified by this list.</p>
+            <p style={muted}>Live customer records from Shopify, newest first. Browse pages to reach older customers. Total store count is shown separately; filters and selection currently apply to the loaded page. WhatsApp consent is not verified by this list.</p>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+              <p style={{ ...muted, margin: 0 }}>
+                Page contains {shopifyCustomers.length} customers{customerPageInfo.hasNextPage ? " · more customers available" : " · end of customer list"}.
+              </p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button type="button" style={buttonStyle} disabled={!new URLSearchParams(location.search).has("customerCursor")} onClick={() => navigate("/app")}>First page</button>
+                <button type="button" style={buttonStyle} disabled={!customerPageInfo.hasNextPage || !customerPageInfo.endCursor} onClick={() => navigate("?customerCursor=" + encodeURIComponent(customerPageInfo.endCursor ?? ""))}>Load next 100 customers →</button>
+              </div>
+            </div>
             {customerError && (
               <div role="alert" style={{ ...cardStyle, color: "var(--bc-danger)", marginBottom: 12 }}>
                 <p style={{ marginTop: 0 }}>{customerError}</p>
