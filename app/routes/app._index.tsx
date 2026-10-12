@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useFetcher, useLoaderData, useRevalidator } from "react-router";
+import { useFetcher, useLoaderData, useLocation, useNavigate, useRevalidator } from "react-router";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
@@ -43,7 +43,12 @@ type ShopifyCustomerNode = {
 
 type CustomerQueryResult = {
   errors?: unknown[];
-  data?: { customers?: { nodes?: ShopifyCustomerNode[] } };
+  data?: {
+    customers?: {
+      nodes?: ShopifyCustomerNode[];
+      pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+    };
+  };
 };
 
 type SavedSegment = {
@@ -212,6 +217,8 @@ const CUSTOMER_QUERY_TIMEOUT_MS = 15_000;
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
+  const requestedCursor = new URL(request.url).searchParams.get("customerCursor");
+  const customerCursor = requestedCursor && requestedCursor.length <= 2048 ? requestedCursor : null;
 
   const [savedSegments, approvedTemplates, campaignDrafts] = await Promise.all([
     prisma.customerSegment.findMany({
@@ -242,8 +249,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   try {
     const response = await admin.graphql(
       `#graphql
-        query BowchikaConnectCustomers {
-          customers(first: 100, sortKey: CREATED_AT, reverse: true) {
+        query BowchikaConnectCustomers($after: String) {
+          customers(first: 100, after: $after, sortKey: CREATED_AT, reverse: true) {
+            pageInfo { hasNextPage endCursor }
             nodes {
               id
               firstName
@@ -258,7 +266,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             }
           }
         }`,
-      { signal: AbortSignal.timeout(CUSTOMER_QUERY_TIMEOUT_MS) },
+      { variables: { after: customerCursor }, signal: AbortSignal.timeout(CUSTOMER_QUERY_TIMEOUT_MS) },
     );
 
     const result = (await response.json()) as CustomerQueryResult;
@@ -268,6 +276,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       console.error("Shopify customer query returned GraphQL errors.");
       return {
         customers: [] as ShopifyCustomer[],
+        customerPageInfo: { hasNextPage: false, endCursor: null },
         savedSegments,
         approvedTemplates,
         campaignDrafts,
@@ -295,6 +304,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     return {
       customers,
+      customerPageInfo: {
+        hasNextPage: Boolean(result.data?.customers?.pageInfo?.hasNextPage),
+        endCursor: result.data?.customers?.pageInfo?.endCursor ?? null,
+      },
       savedSegments,
       approvedTemplates,
       campaignDrafts,
@@ -312,6 +325,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     );
     return {
       customers: [] as ShopifyCustomer[],
+      customerPageInfo: { hasNextPage: false, endCursor: null },
       savedSegments,
       approvedTemplates,
       campaignDrafts,
@@ -641,7 +655,10 @@ export default function Index() {
     approvedTemplates,
     campaignDrafts,
     whatsappConfigured,
+    customerPageInfo,
   } = useLoaderData<typeof loader>();
+  const location = useLocation();
+  const navigate = useNavigate();
   const revalidator = useRevalidator();
   const saveSegmentFetcher = useFetcher<SegmentActionData>();
   const deleteSegmentFetcher = useFetcher<SegmentActionData>();
@@ -792,7 +809,7 @@ export default function Index() {
           <p style={{ margin: 0, color: "var(--bc-muted)" }}>Customer conversations. Made simpler.</p>
           <div style={{ marginTop: 12, fontSize: 12, color: "var(--bc-warning)" }}>DEVELOPMENT MODE · Messages are not sent</div>
           <div style={{ marginTop: 8, fontSize: 12, color: "var(--bc-muted)" }}>
-            Showing up to the 100 most recently created customers. Segment counts use this loaded set.
+            Showing 100 customers per page. Segment counts and campaign previews use the currently loaded page only; they are not whole-store audience totals.
           </div>
         </div>
 
@@ -838,7 +855,7 @@ export default function Index() {
         {tab === "Customers" && (
           <>
             <h2 style={{ fontSize: 20 }}>Customer audience</h2>
-            <p style={muted}>Live customer records from the connected Shopify store (up to the 100 most recently created). WhatsApp consent is not verified by this list.</p>
+            <p style={muted}>Live customer records from Shopify, newest first. Browse pages to reach older customers. Filters and counts apply to the current page; WhatsApp consent is not verified by this list.</p>
             {customerError && (
               <div role="alert" style={{ ...cardStyle, color: "var(--bc-danger)", marginBottom: 12 }}>
                 <p style={{ marginTop: 0 }}>{customerError}</p>
@@ -874,7 +891,13 @@ export default function Index() {
               </table>
               {filteredCustomers.length === 0 && <p style={{ padding: 16 }}>{customerError ? "Customers could not be loaded." : "No customers match these filters."}</p>}
             </div>
-            <p style={muted}>{filteredCustomers.length} shown · {selected.length} selected</p>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginTop: 12 }}>
+              <p style={{ ...muted, margin: 0 }}>{filteredCustomers.length} shown on this page · {selected.length} selected</p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" style={buttonStyle} disabled={!new URLSearchParams(location.search).has("customerCursor")} onClick={() => navigate("/app")}>First page</button>
+                <button type="button" style={buttonStyle} disabled={!customerPageInfo.hasNextPage || !customerPageInfo.endCursor} onClick={() => navigate("?customerCursor=" + encodeURIComponent(customerPageInfo.endCursor ?? ""))}>Next 100 customers →</button>
+              </div>
+            </div>
           </>
         )}
 
