@@ -62,6 +62,7 @@ type SavedSegment = {
 };
 
 type SegmentCount = { count: number | null; error?: string };
+type CustomerFilterCountActionData = { count?: number | null; error?: string };
 
 const escapeShopifySearch = (value: string) => value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
 
@@ -423,6 +424,47 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const formData = await request.formData();
   const intent = textField(formData, "intent");
 
+  if (intent === "count-customer-filter") {
+    const orderRule = textField(formData, "orderRule") || "any";
+    const tag = textField(formData, "tag").trim().slice(0, 100);
+    const spendRule = textField(formData, "spendRule") || "any";
+    const spendAmountRaw = textField(formData, "spendAmount");
+    const lastOrderDaysRaw = textField(formData, "lastOrderDays") || "any";
+    const terms: string[] = [];
+    if (orderRule === "zero") terms.push("orders_count:0");
+    if (orderRule === "one") terms.push("orders_count:1");
+    if (orderRule === "has") terms.push("orders_count:>0");
+    if (orderRule === "repeat") terms.push("orders_count:>=2");
+    if (tag) terms.push(`tag:"${escapeShopifySearch(tag)}"`);
+    const spendAmount = Number(spendAmountRaw);
+    if ((spendRule === "atLeast" || spendRule === "under") && spendAmountRaw !== "" && Number.isFinite(spendAmount) && spendAmount >= 0) {
+      terms.push(`total_spent:${spendRule === "atLeast" ? ">=" : "<"}${spendAmount}`);
+    }
+    if (lastOrderDaysRaw !== "any") {
+      const days = Number(lastOrderDaysRaw);
+      if (Number.isFinite(days) && days >= 0 && days <= 3650) {
+        const cutoff = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+        terms.push(`last_order_date:>=${cutoff}`);
+      }
+    }
+    try {
+      const response = await admin.graphql(
+        `#graphql
+          query BowchikaConnectLiveFilterCount($query: String) {
+            customersCount(limit: 10000, query: $query) { count precision }
+          }`,
+        { variables: { query: terms.length ? terms.join(" AND ") : null }, signal: AbortSignal.timeout(CUSTOMER_QUERY_TIMEOUT_MS) },
+      );
+      const result = await response.json() as { data?: { customersCount?: { count?: number | null; precision?: string } }; errors?: unknown[] };
+      if (result.errors?.length || typeof result.data?.customersCount?.count !== "number") {
+        return actionResult({ error: "Shopify could not calculate this full-store count. Try again." }, 400);
+      }
+      return actionResult({ count: result.data.customersCount.count });
+    } catch {
+      return actionResult({ error: "Full-store count unavailable right now. Try again." }, 502);
+    }
+  }
+
   if (intent === "check-whatsapp") {
     try {
       const config = getMetaConfig();
@@ -744,6 +786,7 @@ export default function Index() {
   const deleteCampaignDraftFetcher = useFetcher<CampaignDraftActionData>();
   const connectionFetcher = useFetcher<WhatsAppActionData>();
   const syncTemplatesFetcher = useFetcher<WhatsAppActionData>();
+  const customerFilterCountFetcher = useFetcher<CustomerFilterCountActionData>();
 
   const [tab, setTab] = useState("Overview");
   const [search, setSearch] = useState(new URLSearchParams(location.search).get("customerSearch") ?? "");
@@ -1034,8 +1077,18 @@ export default function Index() {
                 </label>
               </div>
               <div style={{ padding: 14, background: "var(--bc-surface-muted)", borderRadius: 8 }}>
-                <strong>{activeSegmentId && segmentCounts[activeSegmentId]?.count !== undefined ? (segmentCounts[activeSegmentId]?.count === null ? "Full-store count unavailable" : `${segmentCounts[activeSegmentId]?.count} customers match across the store`) : `${filteredCustomers.length} customers match on this page`}</strong>
-                <p style={{ ...muted, marginBottom: 0 }}>This is a Shopify customer filter preview, not a WhatsApp-eligible audience count. Consent must be verified separately before any marketing send.</p>
+                <strong>{customerFilterCountFetcher.data?.count !== undefined ? `${customerFilterCountFetcher.data.count} customers match across the store` : activeSegmentId && segmentCounts[activeSegmentId]?.count !== undefined ? (segmentCounts[activeSegmentId]?.count === null ? "Full-store count unavailable" : `${segmentCounts[activeSegmentId]?.count} customers match across the store`) : `${filteredCustomers.length} customers match on this page (of ${shopifyCustomers.length} loaded)`}</strong>
+                <p style={{ ...muted, marginBottom: 8 }}>Page count only includes loaded customers. Calculate the full-store count before using this audience. This is not a WhatsApp-eligible audience count; consent must be verified separately.</p>
+                <customerFilterCountFetcher.Form method="post" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <input type="hidden" name="intent" value="count-customer-filter" />
+                  <input type="hidden" name="orderRule" value={orderRule} />
+                  <input type="hidden" name="tag" value={tag} />
+                  <input type="hidden" name="spendRule" value={spendRule} />
+                  <input type="hidden" name="spendAmount" value={spendAmount} />
+                  <input type="hidden" name="lastOrderDays" value={lastOrderDays} />
+                  <button type="submit" style={buttonStyle} disabled={customerFilterCountFetcher.state !== "idle"}>{customerFilterCountFetcher.state === "idle" ? "Calculate full-store count" : "Calculating…"}</button>
+                  {customerFilterCountFetcher.data?.error && <span role="alert" style={{ color: "var(--bc-danger)" }}>{customerFilterCountFetcher.data.error}</span>}
+                </customerFilterCountFetcher.Form>
               </div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <button style={buttonStyle} onClick={resetFilters}>Reset filters</button>
