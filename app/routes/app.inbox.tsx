@@ -175,6 +175,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       Boolean(testRecipientConversation?.lastInboundAt) &&
       testRecipientConversation?.isDemo === false,
     testSendingReady,
+    // Keep the UI's explicit live-sending switch in sync with the server gate.
+    inboxSendingOptIn: isWhatsAppInboxSendingEnabled(),
     // Outbound Cloud API sends only need valid credentials and the correct shop.
     // Webhook verification is required for inbound messages and delivery-status updates,
     // but must not block a customer-initiated template send.
