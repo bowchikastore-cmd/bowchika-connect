@@ -721,26 +721,6 @@ const dateLabel = (date: string | null) => {
   });
 };
 
-const matchesSavedSegment = (customer: ShopifyCustomer, segment: SavedSegment) => {
-  if (segment.orderRule === "zero" && customer.numberOfOrders !== 0) return false;
-  if (segment.orderRule === "one" && customer.numberOfOrders !== 1) return false;
-  if (segment.orderRule === "repeat" && customer.numberOfOrders < 2) return false;
-  if (segment.orderRule === "has" && customer.numberOfOrders < 1) return false;
-  if (
-    segment.tag.trim() &&
-    !customer.tags.some((item) => item.toLowerCase().includes(segment.tag.trim().toLowerCase()))
-  ) return false;
-  if (segment.spendRule === "atLeast" && customer.amountSpent < (segment.spendAmount ?? 0)) return false;
-  if (segment.spendRule === "under" && customer.amountSpent >= (segment.spendAmount ?? 0)) return false;
-
-  if (segment.lastOrderDays !== null) {
-    if (!customer.lastOrderAt) return false;
-    const cutoff = Date.now() - segment.lastOrderDays * 24 * 60 * 60 * 1000;
-    if (new Date(customer.lastOrderAt).getTime() < cutoff) return false;
-  }
-  return true;
-};
-
 export default function Index() {
   const {
     customers: shopifyCustomers,
