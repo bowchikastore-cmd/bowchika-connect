@@ -171,14 +171,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       }
     }),
     testRecipientPhone,
-    testRecipientConfigured: Boolean(testRecipientPhone),
     testRecipientHasInbound:
       Boolean(testRecipientConversation?.lastInboundAt) &&
       testRecipientConversation?.isDemo === false,
-    webhookVerified,
-    testSendingOptIn: isWhatsAppTestSendingEnabled(),
     testSendingReady,
-    inboxSendingOptIn: isWhatsAppInboxSendingEnabled(),
     // Outbound Cloud API sends only need valid credentials and the correct shop.
     // Webhook verification is required for inbound messages and delivery-status updates,
     // but must not block a customer-initiated template send.
@@ -186,11 +182,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       isWhatsAppInboxSendingEnabled() &&
       metaConfigured &&
       tenantBound,
-    activeShopDomain,
-    configuredShopDomain,
-    tenantBound,
-    webhookConfigurationComplete:
-      isWhatsAppWebhookConfigurationComplete() && metaConfigured,
     now: new Date().toISOString(),
   };
 };
@@ -319,9 +310,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (isStartNewChat) {
     const rawRecipient = formText(formData, "recipientPhone");
     const normalizedRecipient = normalizeE164Phone(rawRecipient);
-    if (!rawRecipient.startsWith("+") || !normalizedRecipient) {
+    if (!normalizedRecipient) {
       return json(
-        { error: "Enter a valid international phone number beginning with +." },
+        { error: "Enter a valid international phone number including its country code." },
         400,
       );
     }
@@ -744,17 +735,9 @@ export default function InboxPage() {
     messages,
     approvedTemplates,
     testRecipientPhone,
-    testRecipientConfigured,
     testRecipientHasInbound,
-    webhookVerified,
-    testSendingOptIn,
     testSendingReady,
-    inboxSendingOptIn,
     inboxSendingReady,
-    activeShopDomain,
-    configuredShopDomain,
-    tenantBound,
-    webhookConfigurationComplete,
   } = useLoaderData<typeof loader>();
   const actionFetcher = useFetcher<InboxActionData>();
   const newChatFetcher = useFetcher<InboxActionData>();
@@ -890,98 +873,6 @@ export default function InboxPage() {
           </actionFetcher.Form>
         </header>
 
-        <section className="bc-test-gate" aria-labelledby="test-gate-heading">
-          <div>
-            <h2 id="test-gate-heading">WhatsApp sending controls</h2>
-            <p>
-              General Inbox sending and the restricted personal-phone test path are separately gated. Campaign and scheduled sending remain disabled.
-            </p>
-          </div>
-          <ul>
-            <li data-ready={tenantBound}>
-              Shop binding:{" "}
-              {tenantBound
-                ? "matched"
-                : configuredShopDomain
-                  ? "blocked — configured shop does not match this Shopify session"
-                  : "blocked — WHATSAPP_SHOP_DOMAIN is missing"}
-            </li>
-            <li data-ready={webhookConfigurationComplete}>
-              Cloud API credentials and Meta app secret: {webhookConfigurationComplete ? "configured" : "blocked — incomplete"}
-            </li>
-            <li data-ready={webhookVerified}>
-              Meta GET webhook verification: {webhookVerified ? "verified" : "blocked — not verified"}
-            </li>
-            <li data-ready={testRecipientHasInbound}>
-              Signed inbound test message: {testRecipientHasInbound ? "received" : "blocked — waiting for the configured phone's first message"}
-            </li>
-            <li data-ready={testRecipientConfigured}>
-              Allow-listed test phone: {testRecipientConfigured ? "configured" : "blocked — configure WHATSAPP_TEST_RECIPIENT_PHONE"}
-            </li>
-            <li data-ready={approvedTemplates.length > 0}>
-              Approved template: {approvedTemplates.length > 0 ? `${approvedTemplates.length} synced` : "blocked — sync an approved template"}
-            </li>
-            <li data-ready={testSendingOptIn}>
-              Test-only sending switch: {testSendingOptIn ? "enabled" : "disabled"}
-            </li>
-            <li data-ready={inboxSendingOptIn}>
-              General Inbox sending switch: {inboxSendingOptIn ? "enabled" : "disabled"}
-            </li>
-            <li data-ready={inboxSendingReady}>
-              Outbound WhatsApp sending: {inboxSendingReady ? "ready" : "blocked until the sending switch, shop binding, and Cloud API credentials are ready"}
-            </li>
-          </ul>
-          <p className="bc-inbox-shop-binding">
-            Current authenticated shop: <strong>{activeShopDomain}</strong>
-            <br />
-            WHATSAPP_SHOP_DOMAIN:{" "}
-            <strong>{configuredShopDomain ?? "not configured"}</strong>
-          </p>
-          <div className="bc-inbox-setup">
-            <h3>Meta webhook setup</h3>
-            <ol>
-              <li>
-                Set <code>WHATSAPP_SHOP_DOMAIN</code> to the exact shop shown
-                above only if it is the intended shop. The app will not
-                substitute the development shop for another store. Restart
-                <code> shopify app dev</code> after changing server environment
-                values.
-              </li>
-              <li>
-                In Meta for Developers, open your app&apos;s WhatsApp
-                configuration and set the callback URL to the current public
-                HTTPS Shopify CLI tunnel URL followed by{" "}
-                <code>/webhooks/whatsapp</code>. Do not use localhost or a
-                previous tunnel URL.
-              </li>
-              <li>
-                Enter the configured verification token in Meta and verify the
-                callback. The GET check uses{" "}
-                <code>WHATSAPP_WEBHOOK_VERIFY_TOKEN</code>; its value is never
-                shown here.
-              </li>
-              <li>
-                Subscribe the WhatsApp Business Account to the{" "}
-                <code>messages</code> webhook field (and to this app if Meta
-                requires it). A signed inbound message from the configured test
-                phone completes the inbound check.
-              </li>
-            </ol>
-            <p>
-              POST signature checks use the existing{" "}
-              <code>META_APP_SECRET</code>. General Inbox sending remains
-              disabled unless{" "}
-              <code> WHATSAPP_INBOX_SENDING_ENABLED=true</code> is explicitly
-              set after webhook verification and policy/consent review. The
-              older test switch and its recipient allowlist only enable the
-              restricted test path; they do not unlock general Inbox sends.
-            </p>
-          </div>
-          <p className="bc-inbox-hint">
-            Sample conversations always stay local. The Sidekick/assistant bar, if visible at the bottom of Shopify Admin, is part of Shopify Admin and is outside this app&apos;s styling boundary.
-          </p>
-        </section>
-
         <div className="bc-inbox-shell">
           <aside className="bc-conversation-list" aria-label="Conversations">
             <div className="bc-conversation-list-heading">
@@ -1031,11 +922,11 @@ export default function InboxPage() {
                       name="recipientPhone"
                       type="tel"
                       autoComplete="tel"
-                      placeholder="+15551234567"
+                      placeholder="91 88266 52902 or +91 88266 52902"
                       value={newChatRecipient}
                       onChange={(event) => setNewChatRecipient(event.target.value)}
                       required
-                      pattern="\\+[0-9 ()-]{7,24}"
+                      pattern="\\+?[0-9 ()-]{7,24}"
                       disabled={newChatFetcher.state !== "idle"}
                     />
                     <label htmlFor="bc-new-chat-template">
@@ -1112,7 +1003,6 @@ export default function InboxPage() {
                           Boolean(newChatTemplate.requirements.unsupported) ||
                           Boolean(newChatTemplate.componentError) ||
                           normalizeE164Phone(newChatRecipient) === null ||
-                          !newChatRecipient.trim().startsWith("+") ||
                           newChatFetcher.state !== "idle"
                         }
                       >
