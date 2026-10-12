@@ -217,8 +217,14 @@ const CUSTOMER_QUERY_TIMEOUT_MS = 15_000;
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
-  const requestedCursor = new URL(request.url).searchParams.get("customerCursor");
+  const requestUrl = new URL(request.url);
+  const requestedCursor = requestUrl.searchParams.get("customerCursor");
   const customerCursor = requestedCursor && requestedCursor.length <= 2048 ? requestedCursor : null;
+  const customerSearch = (requestUrl.searchParams.get("customerSearch") ?? "").trim().slice(0, 100);
+  const escapedCustomerSearch = customerSearch.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+  const customerSearchQuery = escapedCustomerSearch
+    ? `name:*${escapedCustomerSearch}* OR email:*${escapedCustomerSearch}* OR phone:*${escapedCustomerSearch}* OR tag:*${escapedCustomerSearch}*`
+    : null;
 
   const [savedSegments, approvedTemplates, campaignDrafts] = await Promise.all([
     prisma.customerSegment.findMany({
@@ -271,8 +277,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   try {
     const response = await admin.graphql(
       `#graphql
-        query BowchikaConnectCustomers($after: String) {
-          customers(first: 100, after: $after, sortKey: CREATED_AT, reverse: true) {
+        query BowchikaConnectCustomers($after: String, $query: String) {
+          customers(first: 100, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {
             pageInfo { hasNextPage endCursor }
             nodes {
               id
@@ -288,7 +294,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             }
           }
         }`,
-      { variables: { after: customerCursor }, signal: AbortSignal.timeout(CUSTOMER_QUERY_TIMEOUT_MS) },
+      { variables: { after: customerCursor, query: customerSearchQuery }, signal: AbortSignal.timeout(CUSTOMER_QUERY_TIMEOUT_MS) },
     );
 
     const result = (await response.json()) as CustomerQueryResult;
@@ -699,7 +705,7 @@ export default function Index() {
   const syncTemplatesFetcher = useFetcher<WhatsAppActionData>();
 
   const [tab, setTab] = useState("Overview");
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(new URLSearchParams(location.search).get("customerSearch") ?? "");
   const [selected, setSelected] = useState<string[]>([]);
   const [campaign, setCampaign] = useState("Bowchika customer campaign");
   const [template, setTemplate] = useState("");
@@ -730,8 +736,9 @@ export default function Index() {
     }
   }, [deleteCampaignDraftFetcher.data, editingCampaignDraftId]);
 
+  const activeServerSearch = new URLSearchParams(location.search).get("customerSearch") ?? "";
   const filteredCustomers = useMemo(() => {
-    const query = search.trim().toLowerCase();
+    const query = activeServerSearch ? "" : search.trim().toLowerCase();
     const spendThreshold = Number(spendAmount || 0);
     const cutoff = lastOrderDays === "any"
       ? null
@@ -758,7 +765,7 @@ export default function Index() {
       }
       return true;
     });
-  }, [shopifyCustomers, search, orderRule, tag, spendRule, spendAmount, lastOrderDays]);
+  }, [shopifyCustomers, search, activeServerSearch, orderRule, tag, spendRule, spendAmount, lastOrderDays]);
 
   const audienceSegment = savedSegments.find((segment) => segment.id === audienceSegmentId);
   const audienceCustomerCount = audienceSegment
@@ -903,8 +910,8 @@ export default function Index() {
                 Page contains {shopifyCustomers.length} customers{customerPageInfo.hasNextPage ? " · more customers available" : " · end of customer list"}.
               </p>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button type="button" style={buttonStyle} disabled={!new URLSearchParams(location.search).has("customerCursor")} onClick={() => navigate("/app")}>First page</button>
-                <button type="button" style={buttonStyle} disabled={!customerPageInfo.hasNextPage || !customerPageInfo.endCursor} onClick={() => navigate("?customerCursor=" + encodeURIComponent(customerPageInfo.endCursor ?? ""))}>Load next 100 customers →</button>
+                <button type="button" style={buttonStyle} disabled={!new URLSearchParams(location.search).has("customerCursor")} onClick={() => navigate(new URLSearchParams(location.search).get("customerSearch") ? `?customerSearch=${encodeURIComponent(new URLSearchParams(location.search).get("customerSearch") ?? "")}` : "/app")}>First page</button>
+                <button type="button" style={buttonStyle} disabled={!customerPageInfo.hasNextPage || !customerPageInfo.endCursor} onClick={() => { const params = new URLSearchParams(location.search); params.set("customerCursor", customerPageInfo.endCursor ?? ""); navigate(`?${params.toString()}`); }}>Load next 100 customers →</button>
               </div>
             </div>
             {customerError && (
@@ -920,12 +927,22 @@ export default function Index() {
                 </button>
               </div>
             )}
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
-              <input placeholder="Search name, email, phone or tag" value={search} onChange={(event) => setSearch(event.target.value)} style={{ ...inputStyle, flex: 1, minWidth: 220, marginTop: 0 }} />
-              <button style={buttonStyle} onClick={() => setSelected(filteredCustomers.map((customer) => customer.id))}>Select all shown</button>
-              <button style={buttonStyle} onClick={() => setSelected([])}>Clear selection</button>
-              <button style={buttonStyle} onClick={resetFilters}>Clear filters</button>
-            </div>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                const params = new URLSearchParams();
+                if (search.trim()) params.set("customerSearch", search.trim());
+                setSelected([]);
+                navigate(params.size ? `?${params.toString()}` : "/app");
+              }}
+              style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14, alignItems: "center" }}
+            >
+              <input placeholder="Search all Shopify customers by name, email, phone or tag" value={search} onChange={(event) => setSearch(event.target.value)} style={{ ...inputStyle, flex: 1, minWidth: 220, marginTop: 0 }} />
+              <button type="submit" style={buttonStyle}>Search</button>
+              <button type="button" style={buttonStyle} onClick={() => setSelected(filteredCustomers.map((customer) => customer.id))}>Select all shown</button>
+              <button type="button" style={buttonStyle} onClick={() => setSelected([])}>Clear selection</button>
+              <button type="button" style={buttonStyle} onClick={() => { setSearch(""); resetFilters(); navigate("/app"); }}>Clear filters</button>
+            </form>
             <div style={{ ...cardStyle, overflowX: "auto", padding: 0 }}>
               <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left" }}>
                 <thead><tr style={{ background: "var(--bc-surface-muted)" }}>{["Select", "Customer", "Email", "Phone", "Orders", "Spent", "Last order", "Tags"].map((heading) => <th key={heading} style={{ padding: 12, fontSize: 12 }}>{heading}</th>)}</tr></thead>
@@ -946,7 +963,7 @@ export default function Index() {
               <p style={{ ...muted, margin: 0 }}>{filteredCustomers.length} shown on this page · {selected.length} selected</p>
               <div style={{ display: "flex", gap: 8 }}>
                 <button type="button" style={buttonStyle} disabled={!new URLSearchParams(location.search).has("customerCursor")} onClick={() => navigate("/app")}>First page</button>
-                <button type="button" style={buttonStyle} disabled={!customerPageInfo.hasNextPage || !customerPageInfo.endCursor} onClick={() => navigate("?customerCursor=" + encodeURIComponent(customerPageInfo.endCursor ?? ""))}>Next 100 customers →</button>
+                <button type="button" style={buttonStyle} disabled={!customerPageInfo.hasNextPage || !customerPageInfo.endCursor} onClick={() => { const params = new URLSearchParams(location.search); params.set("customerCursor", customerPageInfo.endCursor ?? ""); navigate(`?${params.toString()}`); }}>Next 100 customers →</button>
               </div>
             </div>
           </>
