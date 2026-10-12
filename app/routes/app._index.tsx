@@ -223,7 +223,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const customerSearch = (requestUrl.searchParams.get("customerSearch") ?? "").trim().slice(0, 100);
   const escapedCustomerSearch = customerSearch.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
   const customerSearchQuery = escapedCustomerSearch
-    ? `name:*${escapedCustomerSearch}* OR email:*${escapedCustomerSearch}* OR phone:*${escapedCustomerSearch}* OR tag:*${escapedCustomerSearch}*`
+    ? `name:"${escapedCustomerSearch}" OR email:"${escapedCustomerSearch}" OR phone:"${escapedCustomerSearch}" OR tag:"${escapedCustomerSearch}"`
     : null;
 
   const [savedSegments, approvedTemplates, campaignDrafts] = await Promise.all([
