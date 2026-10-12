@@ -72,8 +72,8 @@ const buildSegmentCustomerQuery = (segment: SavedSegment) => {
   if (segment.orderRule === "has") terms.push("orders_count:>0");
   if (segment.orderRule === "repeat") terms.push("orders_count:>=2");
   if (segment.tag.trim()) terms.push(`tag:"${escapeShopifySearch(segment.tag.trim())}"`);
-  if (segment.spendRule === "atLeast" && segment.spendAmount !== null) terms.push(`amount_spent:>=${segment.spendAmount}`);
-  if (segment.spendRule === "under" && segment.spendAmount !== null) terms.push(`amount_spent:<${segment.spendAmount}`);
+  if (segment.spendRule === "atLeast" && segment.spendAmount !== null) terms.push(`total_spent:>=${segment.spendAmount}`);
+  if (segment.spendRule === "under" && segment.spendAmount !== null) terms.push(`total_spent:<${segment.spendAmount}`);
   if (segment.lastOrderDays !== null) {
     const cutoff = new Date(Date.now() - segment.lastOrderDays * 86400000).toISOString().slice(0, 10);
     terms.push(`last_order_date:>=${cutoff}`);
