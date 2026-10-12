@@ -837,7 +837,7 @@ export default function Index() {
           <p style={{ margin: 0, color: "var(--bc-muted)" }}>Customer conversations. Made simpler.</p>
           <div style={{ marginTop: 12, fontSize: 12, color: "var(--bc-warning)" }}>DEVELOPMENT MODE · Messages are not sent</div>
           <div style={{ marginTop: 8, fontSize: 12, color: "var(--bc-muted)" }}>
-            Showing ${shopifyCustomers.length} customers on this page. Total store count is shown separately; filters currently apply to the loaded page.
+            Showing {shopifyCustomers.length} customers on this page. Total store count is shown separately; filters currently apply to the loaded page.
           </div>
         </div>
 
