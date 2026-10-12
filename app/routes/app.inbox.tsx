@@ -737,6 +737,7 @@ export default function InboxPage() {
     testRecipientPhone,
     testRecipientHasInbound,
     testSendingReady,
+    inboxSendingOptIn,
     inboxSendingReady,
   } = useLoaderData<typeof loader>();
   const actionFetcher = useFetcher<InboxActionData>();
