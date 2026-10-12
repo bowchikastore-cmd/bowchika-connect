@@ -856,6 +856,15 @@ export default function Index() {
           <>
             <h2 style={{ fontSize: 20 }}>Customer audience</h2>
             <p style={muted}>Live customer records from Shopify, newest first. Browse pages to reach older customers. Filters and counts apply to the current page; WhatsApp consent is not verified by this list.</p>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+              <p style={{ ...muted, margin: 0 }}>
+                Page contains {shopifyCustomers.length} customers{customerPageInfo.hasNextPage ? " · more customers available" : " · end of customer list"}.
+              </p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button type="button" style={buttonStyle} disabled={!new URLSearchParams(location.search).has("customerCursor")} onClick={() => navigate("/app")}>First page</button>
+                <button type="button" style={buttonStyle} disabled={!customerPageInfo.hasNextPage || !customerPageInfo.endCursor} onClick={() => navigate("?customerCursor=" + encodeURIComponent(customerPageInfo.endCursor ?? ""))}>Load next 100 customers →</button>
+              </div>
+            </div>
             {customerError && (
               <div role="alert" style={{ ...cardStyle, color: "var(--bc-danger)", marginBottom: 12 }}>
                 <p style={{ marginTop: 0 }}>{customerError}</p>
