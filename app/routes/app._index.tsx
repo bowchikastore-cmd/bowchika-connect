@@ -351,6 +351,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     );
     return {
       customers: [] as ShopifyCustomer[],
+      totalCustomerCount,
+      healthMetrics,
       customerPageInfo: { hasNextPage: false, endCursor: null },
       savedSegments,
       approvedTemplates,
