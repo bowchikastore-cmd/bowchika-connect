@@ -179,12 +179,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     testSendingOptIn: isWhatsAppTestSendingEnabled(),
     testSendingReady,
     inboxSendingOptIn: isWhatsAppInboxSendingEnabled(),
+    // Outbound Cloud API sends only need valid credentials and the correct shop.
+    // Webhook verification is required for inbound messages and delivery-status updates,
+    // but must not block a customer-initiated template send.
     inboxSendingReady:
       isWhatsAppInboxSendingEnabled() &&
-      isWhatsAppWebhookConfigurationComplete() &&
       metaConfigured &&
-      tenantBound &&
-      webhookVerified,
+      tenantBound,
     activeShopDomain,
     configuredShopDomain,
     tenantBound,
@@ -457,25 +458,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return json({ error: whatsAppApiErrorMessage(error) }, 503);
   }
 
-  if (
-    !isWhatsAppWebhookConfigurationComplete() ||
-    getConfiguredWhatsAppShop() !== session.shop
-  ) {
+  // Sending outbound messages does not depend on webhook verification.
+  // The webhook is still required to receive customer messages and delivery statuses.
+  if (getConfiguredWhatsAppShop() !== session.shop) {
     return json(
-      { error: "WhatsApp sending is blocked until this shop and Cloud API configuration are verified." },
-      403,
-    );
-  }
-  const webhookPhoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() ?? "";
-  const verifiedWebhook = webhookPhoneNumberId
-    ? await prisma.whatsAppWebhookVerification.findFirst({
-        where: { shop: session.shop, phoneNumberId: webhookPhoneNumberId },
-        select: { shop: true },
-      })
-    : null;
-  if (!verifiedWebhook) {
-    return json(
-      { error: "Meta webhook verification is not recorded for this shop and phone number yet." },
+      { error: "The configured WhatsApp shop does not match this Shopify store." },
       403,
     );
   }
@@ -941,7 +928,7 @@ export default function InboxPage() {
               General Inbox sending switch: {inboxSendingOptIn ? "enabled" : "disabled"}
             </li>
             <li data-ready={inboxSendingReady}>
-              General Inbox sending: {inboxSendingReady ? "ready" : "blocked until switch, shop, Cloud API configuration, and webhook verification are ready"}
+              Outbound WhatsApp sending: {inboxSendingReady ? "ready" : "blocked until the sending switch, shop binding, and Cloud API credentials are ready"}
             </li>
           </ul>
           <p className="bc-inbox-shop-binding">
@@ -1097,7 +1084,7 @@ export default function InboxPage() {
                     </label>
                     {!inboxSendingReady && (
                       <p className="bc-inbox-notice" role="status">
-                        Sending is blocked until WHATSAPP_INBOX_SENDING_ENABLED is explicitly enabled and this shop, Cloud API configuration, and Meta webhook verification are ready. No message will be sent while this is blocked.
+                        Outbound sending needs the sending switch, matching Shopify shop, and valid Cloud API credentials. Webhook verification is only needed for receiving messages and delivery updates.
                       </p>
                     )}
                     {newChatFetcher.data?.error && (
