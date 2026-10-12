@@ -829,9 +829,6 @@ export default function Index() {
   }, [shopifyCustomers, search, activeServerSearch, orderRule, tag, spendRule, spendAmount, lastOrderDays]);
 
   const audienceSegment = savedSegments.find((segment) => segment.id === audienceSegmentId);
-  const audienceCustomerCount = audienceSegment
-    ? shopifyCustomers.filter((customer) => matchesSavedSegment(customer, audienceSegment)).length
-    : 0;
   const canPreviewCampaign = Boolean(audienceSegment && !customerError);
 
   const cardStyle = {
