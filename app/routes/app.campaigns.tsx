@@ -105,12 +105,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const templateId = field(data,"templateId");
     const scheduledAtRaw = field(data,"scheduledAt");
     const mediaUrlRaw = field(data,"mediaUrl");
-    const selectedIds = [...new Set(data.getAll("customerId").map(String).filter(Boolean))].slice(0,5000);
+    const selectedIds = [...new Set(data.getAll("customerId").map(String).filter(Boolean))].slice(0,10000);
     const selectAllMatching = field(data, "selectAllMatching") === "true";
     const search = field(data, "audienceSearch").slice(0,120);
     const orderedOnly = field(data, "orderedOnly") !== "false";
     const where: any = { shop: session.shop, ...(orderedOnly ? { numberOfOrders: { gt: 0 } } : {}), ...(search ? { OR: [{firstName:{contains:search}},{lastName:{contains:search}},{email:{contains:search}},{phone:{contains:search}},{orders:{some:{orderName:{contains:search}}}}] } : {}) };
-    const ids = selectAllMatching ? (await prisma.shopifyCustomerMirror.findMany({ where, select: { id: true }, orderBy: { id: "asc" }, take: 10000 })).map(c => c.id) : selectedIds;
+    const ids = selectAllMatching ? (await prisma.shopifyCustomerMirror.findMany({ where, select: { id: true }, orderBy: { id: "asc" } })).map(c => c.id) : selectedIds;
     if (!ids.length) return json({error:"Select at least one customer."},400);
     const template = await prisma.approvedWhatsAppTemplate.findFirst({where:{id:templateId,shop:session.shop}});
     if (!template) return json({error:"Choose a synced approved WhatsApp template."},400);
