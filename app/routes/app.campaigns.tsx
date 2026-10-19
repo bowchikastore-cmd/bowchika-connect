@@ -30,7 +30,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const [templates, customers, orderCount, campaigns] = await Promise.all([
     prisma.approvedWhatsAppTemplate.findMany({ where: { shop: session.shop }, orderBy: [{name:"asc"},{language:"asc"}] }),
     prisma.shopifyCustomerMirror.findMany({
-      where: { shop: session.shop, ...(orderedOnly ? { numberOfOrders: { gt: 0 } } : {}), ...(search ? { OR: [{firstName:{contains:search,mode:"insensitive"}},{lastName:{contains:search,mode:"insensitive"}},{email:{contains:search,mode:"insensitive"}},{phone:{contains:search}},{orders:{some:{orderName:{contains:search,mode:"insensitive"}}}}] } : {}) },
+      where: { shop: session.shop, ...(orderedOnly ? { numberOfOrders: { gt: 0 } } : {}), ...(search ? { OR: [{firstName:{contains:search}},{lastName:{contains:search}},{email:{contains:search}},{phone:{contains:search}},{orders:{some:{orderName:{contains:search}}}}] } : {}) },
       orderBy: [{ updatedAtShopify: "desc" }, { lastName: "asc" }],
       take: 2000,
       include: { orders: { orderBy: [{processedAt:"desc"},{createdAtShopify:"desc"}], take: 1 } },
