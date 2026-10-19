@@ -142,7 +142,8 @@ export default function CampaignCenter() {
   const data = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const [query,setQuery] = useState(data.search);
-  const [selected,setSelected] = useState<string[]>([]);\n  const [selectAllMatching,setSelectAllMatching] = useState(false);
+  const [selected,setSelected] = useState<string[]>([]);
+  const [selectAllMatching,setSelectAllMatching] = useState(false);
   const [orderedOnly,setOrderedOnly] = useState(data.orderedOnly);
   const [chosenTemplate,setChosenTemplate] = useState(data.templates[0]?.id ?? "");
   const [name,setName] = useState("Bowchika customer campaign");

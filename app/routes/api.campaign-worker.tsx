@@ -16,12 +16,14 @@ export const loader=async({request}:LoaderFunctionArgs)=>{
 const resolveValue=(path:string,snapshot:Record<string,any>,campaign:Record<string,any>)=>{
   if(path==="custom") return "";
   if(path==="mediaUrl") return String(campaign.mediaUrl??"");
-  if(path==="latestOrder.productName"){const order=snapshot.latestOrder;if(!order)return "";try{return JSON.parse(order.lineItemsJson||"[]")[0]?.name??""}catch{return ""}}\n  return path.split(".").reduce<any>((value,key)=>value==null?undefined:value[key],snapshot);
+  if(path==="latestOrder.productName"){const order=snapshot.latestOrder;if(!order)return "";try{return JSON.parse(order.lineItemsJson||"[]")[0]?.name??""}catch{return ""}}
+  return path.split(".").reduce<any>((value,key)=>value==null?undefined:value[key],snapshot);
 };
 export const action=async({request}:ActionFunctionArgs)=>{
   if(request.method!=="POST") return new Response("Method not allowed",{status:405});
   if(!isAuthorized(request)) return new Response("Not found",{status:404});
-  if(!isWhatsAppInboxSendingEnabled()) return json({error:"WhatsApp sending is disabled by the existing safety switch."},503);\n  const configuredShop=getConfiguredWhatsAppShop();
+  if(!isWhatsAppInboxSendingEnabled()) return json({error:"WhatsApp sending is disabled by the existing safety switch."},503);
+  const configuredShop=getConfiguredWhatsAppShop();
   if(!configuredShop) return json({error:"WhatsApp shop configuration missing."},503);
   let config;
   try { config=getWhatsAppConfig(); } catch { return json({error:"WhatsApp API configuration missing."},503); }
