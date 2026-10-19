@@ -77,7 +77,7 @@ const buildSegmentCustomerQuery = (segment: SavedSegment) => {
   if (segment.spendRule === "under" && segment.spendAmount !== null) terms.push(`total_spent:<${segment.spendAmount}`);
   if (segment.lastOrderDays !== null) {
     const cutoff = new Date(Date.now() - segment.lastOrderDays * 86400000).toISOString().slice(0, 10);
-    terms.push(`last_order_date:>=${cutoff}`);
+    terms.push(`order_date:>=${cutoff}`);
   }
   return terms.join(" AND ");
 };
@@ -245,7 +245,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const customerSearch = (requestUrl.searchParams.get("customerSearch") ?? "").trim().slice(0, 100);
   const escapedCustomerSearch = customerSearch.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
   const customerSearchQuery = escapedCustomerSearch
-    ? `name:"${escapedCustomerSearch}" OR email:"${escapedCustomerSearch}" OR phone:"${escapedCustomerSearch}" OR tag:"${escapedCustomerSearch}"`
+    ? `first_name:"${escapedCustomerSearch}" OR last_name:"${escapedCustomerSearch}" OR email:"${escapedCustomerSearch}" OR phone:"${escapedCustomerSearch}" OR tag:"${escapedCustomerSearch}"`
     : null;
 
   const [savedSegments, approvedTemplates, campaignDrafts] = await Promise.all([
@@ -289,34 +289,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     webhookPhoneMatches: Boolean(webhookVerification && webhookVerification.phoneNumberId === (process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim()),
     approvedTemplateCount: approvedTemplates.length, savedSegmentCount: savedSegments.length, campaignDraftCount: campaignDrafts.length,
   };
-  let totalCustomerCount: number | null = null;
-  try {
-    const countResponse = await admin.graphql("#graphql\nquery BowchikaConnectCustomerCount { customersCount(limit: 10000) { count precision } }", { signal: AbortSignal.timeout(CUSTOMER_QUERY_TIMEOUT_MS) });
-    const countResult = await countResponse.json() as { data?: { customersCount?: { count?: number | null } }; errors?: unknown[] };
-    if (!countResult.errors?.length && typeof countResult.data?.customersCount?.count === "number") totalCustomerCount = countResult.data.customersCount.count;
-  } catch { /* Keep the customer table usable if the separate total-count request fails. */ }
-
+  // Keep the initial page fast: don't run Shopify count requests for every
+  // saved segment before rendering. Counts can be calculated on demand.
+  const totalCustomerCount: number | null = null;
   const segmentCounts: Record<string, SegmentCount> = {};
-  await Promise.all(savedSegments.map(async (segment) => {
-    try {
-      const query = buildSegmentCustomerQuery(segment);
-      const response = await admin.graphql(
-        `#graphql
-          query BowchikaConnectSegmentCount($query: String) {
-            customersCount(limit: 10000, query: $query) { count precision }
-          }`,
-        { variables: { query: query || null }, signal: AbortSignal.timeout(CUSTOMER_QUERY_TIMEOUT_MS) },
-      );
-      const result = await response.json() as { data?: { customersCount?: { count?: number | null; precision?: string } }; errors?: unknown[] };
-      if (result.errors?.length || typeof result.data?.customersCount?.count !== "number") {
-        segmentCounts[segment.id] = { count: null, error: "Shopify could not calculate this segment count." };
-      } else {
-        segmentCounts[segment.id] = { count: result.data.customersCount.count };
-      }
-    } catch {
-      segmentCounts[segment.id] = { count: null, error: "Segment count unavailable. Retry later." };
-    }
-  }));
 
   try {
     const response = await admin.graphql(
@@ -444,7 +420,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const days = Number(lastOrderDaysRaw);
       if (Number.isFinite(days) && days >= 0 && days <= 3650) {
         const cutoff = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
-        terms.push(`last_order_date:>=${cutoff}`);
+        terms.push(`order_date:>=${cutoff}`);
       }
     }
     try {
