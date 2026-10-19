@@ -60,7 +60,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     try {
       do {
         const response = await admin.graphql(customerQuery, { variables: { after: customerAfter ?? null }, signal: AbortSignal.timeout(20000) });
-        const result = await response.json() as any;
+        const result = await response.json() as { errors?: unknown[]; data?: { customers?: { nodes?: Array<{ id:string; firstName:string|null; lastName:string|null; createdAt:string|null; updatedAt:string|null; tags:string[]; numberOfOrders:number; defaultEmailAddress?:{emailAddress:string|null}|null; defaultPhoneNumber?:{phoneNumber:string|null}|null; amountSpent?:{amount:string;currencyCode:string}|null }>; pageInfo?:{hasNextPage:boolean;endCursor:string|null} }; orders?: { nodes?: Array<{ id:string; name:string; number:number|null; createdAt:string|null; processedAt:string|null; displayFinancialStatus:string|null; displayFulfillmentStatus:string|null; customer?:{id:string}|null; totalPriceSet?:{shopMoney?:{amount:string;currencyCode:string}|null}|null; lineItems?:{nodes?:Array<{name:string;quantity:number;sku:string|null;variantTitle:string|null}>}|null }>; pageInfo?:{hasNextPage:boolean;endCursor:string|null} } } };
         if (result.errors?.length) throw new Error("Shopify customer sync query failed.");
         const connection = result.data?.customers;
         for (const c of connection?.nodes ?? []) {
@@ -75,7 +75,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       } while (customerAfter);
       do {
         const response = await admin.graphql(orderQuery, { variables: { after: orderAfter ?? null }, signal: AbortSignal.timeout(20000) });
-        const result = await response.json() as any;
+        const result = await response.json() as { errors?: unknown[]; data?: { customers?: { nodes?: Array<{ id:string; firstName:string|null; lastName:string|null; createdAt:string|null; updatedAt:string|null; tags:string[]; numberOfOrders:number; defaultEmailAddress?:{emailAddress:string|null}|null; defaultPhoneNumber?:{phoneNumber:string|null}|null; amountSpent?:{amount:string;currencyCode:string}|null }>; pageInfo?:{hasNextPage:boolean;endCursor:string|null} }; orders?: { nodes?: Array<{ id:string; name:string; number:number|null; createdAt:string|null; processedAt:string|null; displayFinancialStatus:string|null; displayFulfillmentStatus:string|null; customer?:{id:string}|null; totalPriceSet?:{shopMoney?:{amount:string;currencyCode:string}|null}|null; lineItems?:{nodes?:Array<{name:string;quantity:number;sku:string|null;variantTitle:string|null}>}|null }>; pageInfo?:{hasNextPage:boolean;endCursor:string|null} } } };
         if (result.errors?.length) throw new Error("Shopify order sync query failed.");
         const connection = result.data?.orders;
         for (const o of connection?.nodes ?? []) {
@@ -111,7 +111,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const selectAllMatching = field(data, "selectAllMatching") === "true";
     const search = field(data, "audienceSearch").slice(0,120);
     const orderedOnly = field(data, "orderedOnly") !== "false";
-    const where: any = { shop: session.shop, ...(orderedOnly ? { numberOfOrders: { gt: 0 } } : {}), ...(search ? { OR: [{firstName:{contains:search}},{lastName:{contains:search}},{email:{contains:search}},{phone:{contains:search}},{orders:{some:{orderName:{contains:search}}}}] } : {}) };
+    const where = { shop: session.shop, ...(orderedOnly ? { numberOfOrders: { gt: 0 } } : {}), ...(search ? { OR: [{firstName:{contains:search}},{lastName:{contains:search}},{email:{contains:search}},{phone:{contains:search}},{orders:{some:{orderName:{contains:search}}}}] } : {}) };
     const ids = selectAllMatching ? (await prisma.shopifyCustomerMirror.findMany({ where, select: { id: true }, orderBy: { id: "asc" } })).map(c => c.id) : selectedIds;
     if (!ids.length) return json({error:"Select at least one customer."},400);
     const template = await prisma.approvedWhatsAppTemplate.findFirst({where:{id:templateId,shop:session.shop}});
