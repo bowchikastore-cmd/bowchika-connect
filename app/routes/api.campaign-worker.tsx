@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
-import { getWhatsAppConfig, sendAndPersistWhatsAppMessage, getConfiguredWhatsAppShop } from "../whatsapp.server";
+import { getWhatsAppConfig, sendAndPersistWhatsAppMessage, getConfiguredWhatsAppShop, isWhatsAppInboxSendingEnabled } from "../whatsapp.server";
 import { buildWhatsAppTemplatePayload, normalizeE164Phone, parseWhatsAppTemplateInput } from "../whatsapp-shared";
 
 const json=(body:object,status=200)=>Response.json(body,{status});
@@ -21,7 +21,7 @@ const resolveValue=(path:string,snapshot:Record<string,any>,campaign:Record<stri
 export const action=async({request}:ActionFunctionArgs)=>{
   if(request.method!=="POST") return new Response("Method not allowed",{status:405});
   if(!isAuthorized(request)) return new Response("Not found",{status:404});
-  const configuredShop=getConfiguredWhatsAppShop();
+  if(!isWhatsAppInboxSendingEnabled()) return json({error:"WhatsApp sending is disabled by the existing safety switch."},503);\n  const configuredShop=getConfiguredWhatsAppShop();
   if(!configuredShop) return json({error:"WhatsApp shop configuration missing."},503);
   let config;
   try { config=getWhatsAppConfig(); } catch { return json({error:"WhatsApp API configuration missing."},503); }
