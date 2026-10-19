@@ -124,7 +124,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       try { const url = new URL(mediaUrlRaw); if(url.protocol!=="https:") throw new Error(); mediaUrl=url.toString(); } catch { return json({error:"Media URL must be a valid HTTPS URL."},400); }
     }
     const mapping: Record<string,string> = {};
-    for (const [key,value] of data.entries()) if (key.startsWith("map_")) mapping[key.slice(4)] = String(value).slice(0,100);
+    for (const [key,value] of data.entries()) { if (key.startsWith("map_")) mapping[key.slice(4)] = String(value).slice(0,100); else if (key.startsWith("custom_")) mapping["custom."+key.slice(7)] = String(value).slice(0,1024); }
     const customers = await prisma.shopifyCustomerMirror.findMany({where:{shop:session.shop,id:{in:ids}},orderBy:{updatedAtShopify:"desc"},include:{orders:{orderBy:{processedAt:"desc"},take:1}}});
     const recipients = customers.filter(c=>c.whatsappOptIn && normalizeE164Phone(c.phone ?? "")).map(c=>({
       shop:session.shop, customerId:c.id, phoneNumber:normalizeE164Phone(c.phone ?? "")!, customerName:[c.firstName,c.lastName].filter(Boolean).join(" ") || null,

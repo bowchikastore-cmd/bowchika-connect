@@ -14,7 +14,7 @@ export const loader=async({request}:LoaderFunctionArgs)=>{
   return json({ok:true,service:"campaign-worker"});
 };
 const resolveValue=(path:string,snapshot:Record<string,any>,campaign:Record<string,any>)=>{
-  if(path==="custom") return String(campaign["custom."+String(arguments[3]??"")]??"");
+  if(path==="custom") return "";
   if(path==="mediaUrl") return String(campaign.mediaUrl??"");
   if(path==="latestOrder.productName"){const order=snapshot.latestOrder;if(!order)return "";try{return JSON.parse(order.lineItemsJson||"[]")[0]?.name??""}catch{return ""}}\n  return path.split(".").reduce<any>((value,key)=>value==null?undefined:value[key],snapshot);
 };
