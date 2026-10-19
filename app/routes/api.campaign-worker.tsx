@@ -68,12 +68,12 @@ export const action=async({request}:ActionFunctionArgs)=>{
           shop:campaign.shop,phoneNumber:phone,clientRequestId:"campaign-recipient:"+recipient.id,type:"TEMPLATE",text:parsed.preview,
         });
         if(result.error) {
-          await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"FAILED",error:"WhatsApp provider rejected or could not accept this message.",failedAt:new Date(),attempts:{increment:1}});
+          await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"FAILED",error:"WhatsApp provider rejected or could not accept this message.",failedAt:new Date(),attempts:{increment:1}}});
         } else {
-          await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"SENT",whatsappMessageId:result.pendingMessage.messageId,sentAt:new Date(),error:null,attempts:{increment:1}});
+          await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"SENT",whatsappMessageId:result.pendingMessage.messageId,sentAt:new Date(),error:null,attempts:{increment:1}}});
         }
       } catch {
-        await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"FAILED",error:"Template mapping or send preparation failed; review the mapping before retrying.",failedAt:new Date(),attempts:{increment:1}});
+        await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"FAILED",error:"Template mapping or send preparation failed; review the mapping before retrying.",failedAt:new Date(),attempts:{increment:1}}});
       }
       processed++;
     }
