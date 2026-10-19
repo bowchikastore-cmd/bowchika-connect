@@ -7,6 +7,8 @@ import { normalizeE164Phone, getWhatsAppTemplateRequirements } from "../whatsapp
 
 const json = (body: object, status = 200) => Response.json(body, { status });
 const field = (data: FormData, key: string) => String(data.get(key) ?? "").trim();
+
+type CampaignActionData = { success?: boolean | string; message?: string; error?: string; campaignId?: string };
 const customerQuery = `#graphql
 query BowchikaCustomerMirror($after: String) {
   customers(first: 100, after: $after, sortKey: CREATED_AT) {
@@ -140,8 +142,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 export default function CampaignCenter() {
   const data = useLoaderData<typeof loader>();
-  const fetcher = useFetcher<typeof action>();
-  const syncFetcher = useFetcher<typeof action>();
+  const fetcher = useFetcher<CampaignActionData>();
+  const syncFetcher = useFetcher<CampaignActionData>();
   const [query,setQuery] = useState(data.search);
   const [selected,setSelected] = useState<string[]>([]);
   const [selectAllMatching,setSelectAllMatching] = useState(false);
@@ -157,8 +159,8 @@ export default function CampaignCenter() {
   return <s-page heading="Customer & Campaign Center"><div style={{maxWidth:1400,margin:"0 auto",padding:20,color:"var(--bc-text, #222)"}}>
     <h1>Shopify customers → WhatsApp campaigns</h1>
     <p>Synced customer and order records, full-store search, bulk selection, approved template mapping and scheduled campaign drafts.</p>
-    <fetcher.Form method="post" style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:16}}><input type="hidden" name="intent" value="sync"/><button style={style} disabled={fetcher.state!=="idle"}>Sync all Shopify customers & orders</button><span>{data.customers.length.toLocaleString("en-IN")} matching local customers · {data.orderCount.toLocaleString("en-IN")} local orders</span></fetcher.Form>
-    {fetcher.data?.success && <p role="status">{fetcher.data.success}</p>}{fetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{fetcher.data.error}</p>}
+    <syncFetcher.Form method="post" style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:16}}><input type="hidden" name="intent" value="sync"/><button style={style} disabled={syncFetcher.state!=="idle"}>Sync all Shopify customers & orders</button><span>{data.customers.length.toLocaleString("en-IN")} matching local customers · {data.orderCount.toLocaleString("en-IN")} local orders</span></syncFetcher.Form>
+    {syncFetcher.data?.message && <p role="status">{syncFetcher.data.message}</p>}{syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{syncFetcher.data.error}</p>}{typeof fetcher.data?.success === "string" && <p role="status">{fetcher.data.success}</p>}{fetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{fetcher.data.error}</p>}
     <form method="get" style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}><input name="q" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search name, email, phone, order ID" style={{...style,flex:1,minWidth:220}}/><label style={{display:"flex",gap:6,alignItems:"center"}}><input type="checkbox" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label><input type="hidden" name="ordered" value={String(orderedOnly)}/><button style={style}>Search</button></form>
     <fetcher.Form method="post" onSubmit={e=>{if(!window.confirm("Save a campaign for the selected audience? Only recipients with verified WhatsApp opt-in are eligible.")){e.preventDefault();return;}}}>
       <input type="hidden" name="intent" value="create-campaign"/><input type="hidden" name="selectAllMatching" value={String(selectAllMatching)}/><input type="hidden" name="audienceSearch" value={query}/><input type="hidden" name="orderedOnly" value={String(orderedOnly)}/>{selected.map(id=><input key={id} type="hidden" name="customerId" value={id}/>)}
