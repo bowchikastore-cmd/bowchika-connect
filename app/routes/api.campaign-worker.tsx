@@ -13,11 +13,18 @@ export const loader=async({request}:LoaderFunctionArgs)=>{
   if(!isAuthorized(request)) return new Response("Not found",{status:404});
   return json({ok:true,service:"campaign-worker"});
 };
-const resolveValue=(path:string,snapshot:Record<string,any>,campaign:Record<string,any>)=>{
+type JsonRecord = Record<string, unknown>;
+type TemplateButton = { url?: string };
+type TemplateComponent = { type?: string; format?: string; text?: string; buttons?: TemplateButton[] };
+const asRecord = (value: unknown): JsonRecord => value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : {};
+const resolveValue=(path:string,snapshot:JsonRecord,campaign:JsonRecord):unknown=>{
   if(path==="custom") return "";
   if(path==="mediaUrl") return String(campaign.mediaUrl??"");
-  if(path==="latestOrder.productName"){const order=snapshot.latestOrder;if(!order)return "";try{return JSON.parse(order.lineItemsJson||"[]")[0]?.name??""}catch{return ""}}
-  return path.split(".").reduce<any>((value,key)=>value==null?undefined:value[key],snapshot);
+  if(path==="latestOrder.productName"){
+    const order=asRecord(snapshot.latestOrder);
+    try { const items=JSON.parse(String(order.lineItemsJson??"[]")) as unknown; return Array.isArray(items)?asRecord(items[0]).name??"":""; } catch { return ""; }
+  }
+  return path.split(".").reduce<unknown>((value,key)=>asRecord(value)[key],snapshot);
 };
 export const action=async({request}:ActionFunctionArgs)=>{
   if(request.method!=="POST") return new Response("Method not allowed",{status:405});
@@ -46,20 +53,20 @@ export const action=async({request}:ActionFunctionArgs)=>{
         await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"SKIPPED",error:"WhatsApp opt-in is missing/revoked or recipient phone changed."}});
         processed++; continue;
       }
-      const snapshot=JSON.parse(recipient.snapshotJson||"{}") as Record<string,any>;
+      const snapshot=JSON.parse(recipient.snapshotJson||"{}") as JsonRecord;
       const mapping=JSON.parse(campaign.variableMappingJson||"{}") as Record<string,string>;
-      const requirementsInput:Record<string,any>={};
+      const requirementsInput:JsonRecord={};
       const get=(section:string,key:string)=>{const path=mapping[section+"."+key]??"name";return String(path==="custom"?(mapping["custom."+section+"."+key]??""):resolveValue(path,snapshot,campaign)??"").trim();};
-      const templateComponents=JSON.parse(campaign.templateComponents) as Array<Record<string,any>>;
-      const bodyVars=[...new Set([...(templateComponents.find(c=>String(c.type).toUpperCase()==="BODY")?.text?.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)??[])].map((m:RegExpMatchArray)=>m[1]))];
-      const headerText=templateComponents.find(c=>String(c.type).toUpperCase()==="HEADER"&&String(c.format).toUpperCase()==="TEXT")?.text as string|undefined;
+      const templateComponents=JSON.parse(campaign.templateComponents) as TemplateComponent[];
+      const bodyVars=[...new Set([...(templateComponents.find(c=>String(c.type??"").toUpperCase()==="BODY")?.text?.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)??[])].map((m:RegExpMatchArray)=>m[1]))];
+      const headerText=templateComponents.find(c=>String(c.type).toUpperCase()==="HEADER"&&String(c.format??"").toUpperCase()==="TEXT")?.text as string|undefined;
       const headerVars=[...new Set([...(headerText?.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)??[])].map(m=>m[1]))];
       const headerImage=templateComponents.some(c=>String(c.type).toUpperCase()==="HEADER"&&String(c.format).toUpperCase()==="IMAGE");
       if(headerVars.length) requirementsInput.header={values:headerVars.map(key=>get("header",key))};
       if(headerImage) requirementsInput.header={value:campaign.mediaUrl??"",mediaType:"url"};
       if(bodyVars.length) requirementsInput.body=bodyVars.map(key=>get("body",key));
       const buttonInputs:Record<string,string[]>={};
-      templateComponents.filter(c=>String(c.type).toUpperCase()==="BUTTONS").forEach(component=>component.buttons?.forEach((button:any,index:number)=>{
+      templateComponents.filter(c=>String(c.type).toUpperCase()==="BUTTONS").forEach(component=>component.buttons?.forEach((button,index:number)=>{
         const matches=[...(String(button.url??"").matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g))].map(m=>m[1]);
         if(matches.length) buttonInputs[String(index)]=matches.map(key=>get("button"+index,key));
       }));
