@@ -49,7 +49,7 @@ export const action=async({request}:ActionFunctionArgs)=>{
       const requirementsInput:Record<string,any>={};
       const get=(section:string,key:string)=>String(resolveValue(mapping[section+"."+key]??"name",snapshot,campaign)??"").trim();
       const templateComponents=JSON.parse(campaign.templateComponents) as Array<Record<string,any>>;
-      const bodyVars=[...new Set((templateComponents.find(c=>String(c.type).toUpperCase()==="BODY")?.text?.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)??[]).map((m:RegExpMatchArray)=>m[1])];
+      const bodyVars=[...new Set([...(templateComponents.find(c=>String(c.type).toUpperCase()==="BODY")?.text?.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)??[])].map((m:RegExpMatchArray)=>m[1]))];
       const headerText=templateComponents.find(c=>String(c.type).toUpperCase()==="HEADER"&&String(c.format).toUpperCase()==="TEXT")?.text as string|undefined;
       const headerVars=[...new Set([...(headerText?.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)??[])].map(m=>m[1]))];
       const headerImage=templateComponents.some(c=>String(c.type).toUpperCase()==="HEADER"&&String(c.format).toUpperCase()==="IMAGE");

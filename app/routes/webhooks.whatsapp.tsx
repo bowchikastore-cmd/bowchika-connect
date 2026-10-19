@@ -277,6 +277,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             },
             data: { status: transition.status },
           });
+          const campaignStatusData: { status: string; deliveredAt?: Date; readAt?: Date; failedAt?: Date } = {
+            status: transition.status,
+            ...(transition.status === "DELIVERED" ? { deliveredAt: eventAt } : {}),
+            ...(transition.status === "READ" ? { readAt: eventAt } : {}),
+            ...(transition.status === "FAILED" ? { failedAt: eventAt } : {}),
+          };
+          await transaction.whatsAppCampaignRecipient.updateMany({
+            where: { shop, whatsappMessageId },
+            data: campaignStatusData,
+          });
         });
       }
     }
