@@ -76,6 +76,89 @@ model CampaignDraft {
   @@index([shop, updatedAt])
 }
 
+model ShopifyCustomerMirror {
+  id String @id
+  shop String
+  firstName String?
+  lastName String?
+  email String?
+  phone String?
+  numberOfOrders Int @default(0)
+  amountSpent Float @default(0)
+  currencyCode String @default("INR")
+  tagsJson String @default("[]")
+  whatsappOptIn Boolean @default(false)
+  createdAtShopify DateTime?
+  updatedAtShopify DateTime?
+  syncedAt DateTime @default(now())
+  orders ShopifyOrderMirror[]
+  @@unique([shop, id])
+  @@index([shop, numberOfOrders])
+  @@index([shop, email])
+  @@index([shop, phone])
+  @@index([shop, lastName, firstName])
+}
+model ShopifyOrderMirror {
+  id String @id
+  shop String
+  customerId String
+  orderName String
+  orderNumber Int?
+  processedAt DateTime?
+  createdAtShopify DateTime?
+  totalPrice Float @default(0)
+  currencyCode String @default("INR")
+  financialStatus String?
+  fulfillmentStatus String?
+  lineItemsJson String @default("[]")
+  syncedAt DateTime @default(now())
+  customer ShopifyCustomerMirror @relation(fields: [shop, customerId], references: [shop, id], onDelete: Cascade)
+  @@unique([shop, id])
+  @@index([shop, customerId, processedAt])
+  @@index([shop, orderName])
+}
+model WhatsAppCampaign {
+  id String @id @default(cuid())
+  shop String
+  name String
+  templateId String
+  templateName String
+  templateLanguage String
+  templateComponents String
+  variableMappingJson String @default("{}")
+  mediaUrl String?
+  scheduledAt DateTime?
+  status String @default("DRAFT")
+  audienceCount Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  recipients WhatsAppCampaignRecipient[]
+  @@index([shop, status, scheduledAt])
+  @@index([shop, createdAt])
+}
+model WhatsAppCampaignRecipient {
+  id String @id @default(cuid())
+  campaignId String
+  shop String
+  customerId String?
+  phoneNumber String
+  customerName String?
+  snapshotJson String @default("{}")
+  status String @default("QUEUED")
+  whatsappMessageId String?
+  error String?
+  attempts Int @default(0)
+  queuedAt DateTime @default(now())
+  sentAt DateTime?
+  deliveredAt DateTime?
+  readAt DateTime?
+  failedAt DateTime?
+  updatedAt DateTime @updatedAt
+  campaign WhatsAppCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  @@unique([campaignId, phoneNumber])
+  @@index([shop, status, queuedAt])
+  @@index([shop, whatsappMessageId])
+}
 model WhatsAppConversation {
   id            String            @id @default(cuid())
   shop          String
