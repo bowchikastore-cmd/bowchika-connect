@@ -140,7 +140,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 export default function CampaignCenter() {
   const data = useLoaderData<typeof loader>();
-  const fetcher = useFetcher<typeof action>();
+  const fetcher = useFetcher<typeof action>();\n  const syncFetcher = useFetcher<typeof action>();
   const [query,setQuery] = useState(data.search);
   const [selected,setSelected] = useState<string[]>([]);
   const [selectAllMatching,setSelectAllMatching] = useState(false);
