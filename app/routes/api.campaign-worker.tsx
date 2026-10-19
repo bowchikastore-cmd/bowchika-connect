@@ -29,7 +29,7 @@ export const action=async({request}:ActionFunctionArgs)=>{
   try { config=getWhatsAppConfig(); } catch { return json({error:"WhatsApp API configuration missing."},503); }
   const now=new Date();
   const campaigns=await prisma.whatsAppCampaign.findMany({
-    where:{shop:configuredShop,status:{in:["QUEUED","SCHEDULED"]},OR:[{scheduledAt:null},{scheduledAt:{lte:now}}]},
+    where:{shop:configuredShop,status:{in:["QUEUED","SCHEDULED","SENDING"]},OR:[{scheduledAt:null},{scheduledAt:{lte:now}}]},
     orderBy:{createdAt:"asc"},take:3,
   });
   let processed=0;
