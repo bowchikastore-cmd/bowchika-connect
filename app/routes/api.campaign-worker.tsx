@@ -14,9 +14,9 @@ export const loader=async({request}:LoaderFunctionArgs)=>{
   return json({ok:true,service:"campaign-worker"});
 };
 const resolveValue=(path:string,snapshot:Record<string,any>,campaign:Record<string,any>)=>{
-  if(path==="custom") return "";
+  if(path==="custom") return String(campaign["custom."+String(arguments[3]??"")]??"");
   if(path==="mediaUrl") return String(campaign.mediaUrl??"");
-  return path.split(".").reduce<any>((value,key)=>value==null?undefined:value[key],snapshot);
+  if(path==="latestOrder.productName"){const order=snapshot.latestOrder;if(!order)return "";try{return JSON.parse(order.lineItemsJson||"[]")[0]?.name??""}catch{return ""}}\n  return path.split(".").reduce<any>((value,key)=>value==null?undefined:value[key],snapshot);
 };
 export const action=async({request}:ActionFunctionArgs)=>{
   if(request.method!=="POST") return new Response("Method not allowed",{status:405});
@@ -47,7 +47,7 @@ export const action=async({request}:ActionFunctionArgs)=>{
       const snapshot=JSON.parse(recipient.snapshotJson||"{}") as Record<string,any>;
       const mapping=JSON.parse(campaign.variableMappingJson||"{}") as Record<string,string>;
       const requirementsInput:Record<string,any>={};
-      const get=(section:string,key:string)=>String(resolveValue(mapping[section+"."+key]??"name",snapshot,campaign)??"").trim();
+      const get=(section:string,key:string)=>{const path=mapping[section+"."+key]??"name";return String(path==="custom"?(mapping["custom."+section+"."+key]??""):resolveValue(path,snapshot,campaign)??"").trim();};
       const templateComponents=JSON.parse(campaign.templateComponents) as Array<Record<string,any>>;
       const bodyVars=[...new Set([...(templateComponents.find(c=>String(c.type).toUpperCase()==="BODY")?.text?.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)??[])].map((m:RegExpMatchArray)=>m[1]))];
       const headerText=templateComponents.find(c=>String(c.type).toUpperCase()==="HEADER"&&String(c.format).toUpperCase()==="TEXT")?.text as string|undefined;
