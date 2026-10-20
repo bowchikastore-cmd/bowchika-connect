@@ -1,13 +1,15 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
-import { getWhatsAppConfig, sendAndPersistWhatsAppMessage, getConfiguredWhatsAppShop, isWhatsAppInboxSendingEnabled } from "../whatsapp.server";
+import { getWhatsAppConfig, sendAndPersistWhatsAppMessage, getConfiguredWhatsAppShop, isWhatsAppInboxSendingEnabled, safeStringEqual } from "../whatsapp.server";
 import { buildWhatsAppTemplatePayload, normalizeE164Phone, parseWhatsAppTemplateInput } from "../whatsapp-shared";
 
 const json=(body:object,status=200)=>Response.json(body,{status});
 const isAuthorized=(request:Request)=>{
   const secret=(process.env.CAMPAIGN_WORKER_SECRET??"").trim();
-  const supplied=(request.headers.get("authorization")??"").replace(/^Bearer\s+/i,"").trim();
-  return secret.length>=32 && supplied.length===secret.length && supplied===secret;
+  const authorization=request.headers.get("authorization")??"";
+  const match=/^Bearer\\s+(.+)$/i.exec(authorization);
+  const supplied=match?.[1]?.trim()??"";
+  return secret.length>=32 && safeStringEqual(secret,supplied);
 };
 export const loader=async({request}:LoaderFunctionArgs)=>{
   if(!isAuthorized(request)) return new Response("Not found",{status:404});
@@ -47,6 +49,12 @@ export const action=async({request}:ActionFunctionArgs)=>{
     });
     if(campaign.status==="SCHEDULED") await prisma.whatsAppCampaign.updateMany({where:{id:campaign.id,shop:campaign.shop,status:"SCHEDULED"},data:{status:"SENDING"}});
     for(const recipient of pending){
+      // Claim each queued recipient atomically so overlapping worker invocations cannot both send it.
+      const claim = await prisma.whatsAppCampaignRecipient.updateMany({
+        where:{id:recipient.id,shop:campaign.shop,campaignId:campaign.id,status:"QUEUED",attempts:recipient.attempts},
+        data:{status:"PROCESSING",attempts:{increment:1}},
+      });
+      if(claim.count!==1) continue;
       const current=recipient.customerId?await prisma.shopifyCustomerMirror.findFirst({where:{id:recipient.customerId,shop:campaign.shop},select:{whatsappOptIn:true,phone:true}}):null;
       const phone=normalizeE164Phone(current?.phone??recipient.phoneNumber);
       if(!current?.whatsappOptIn || !phone || phone!==normalizeE164Phone(recipient.phoneNumber)){
@@ -77,12 +85,12 @@ export const action=async({request}:ActionFunctionArgs)=>{
           shop:campaign.shop,phoneNumber:phone,clientRequestId:"campaign-recipient:"+recipient.id,type:"TEMPLATE",text:parsed.preview,
         });
         if(result.error) {
-          await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"FAILED",error:"WhatsApp provider rejected or could not accept this message.",failedAt:new Date(),attempts:{increment:1}}});
+          await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"FAILED",error:"WhatsApp provider rejected or could not accept this message.",failedAt:new Date()}});
         } else {
-          await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"SENT",whatsappMessageId:result.pendingMessage.messageId,sentAt:new Date(),error:null,attempts:{increment:1}}});
+          await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"SENT",whatsappMessageId:result.pendingMessage.messageId,sentAt:new Date(),error:null}});
         }
       } catch {
-        await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"FAILED",error:"Template mapping or send preparation failed; review the mapping before retrying.",failedAt:new Date(),attempts:{increment:1}}});
+        await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"FAILED",error:"Template mapping or send preparation failed; review the mapping before retrying.",failedAt:new Date()}});
       }
       processed++;
     }
