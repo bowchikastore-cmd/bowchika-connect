@@ -7,7 +7,7 @@ const json=(body:object,status=200)=>Response.json(body,{status});
 const isAuthorized=(request:Request)=>{
   const secret=(process.env.CAMPAIGN_WORKER_SECRET??"").trim();
   const authorization=request.headers.get("authorization")??"";
-  const match=/^Bearer\\s+(.+)$/i.exec(authorization);
+  const match=/^Bearer\s+(.+)$/i.exec(authorization);
   const supplied=match?.[1]?.trim()??"";
   return secret.length>=32 && safeStringEqual(secret,supplied);
 };
