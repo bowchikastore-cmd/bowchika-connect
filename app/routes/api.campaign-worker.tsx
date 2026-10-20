@@ -87,7 +87,26 @@ export const action=async({request}:ActionFunctionArgs)=>{
         if(result.error) {
           await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"FAILED",error:"WhatsApp provider rejected or could not accept this message.",failedAt:new Date()}});
         } else {
-          await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"SENT",whatsappMessageId:result.pendingMessage.messageId,sentAt:new Date(),error:null}});
+          const acceptedMessageId = result.pendingMessage.messageId;
+          await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"SENT",whatsappMessageId:acceptedMessageId,sentAt:new Date(),error:null}});
+          // Reconcile a status webhook that arrived before the send response persisted its message ID.
+          const earlyStatus = await prisma.whatsAppMessageStatusEvent.findMany({
+            where:{shop:campaign.shop,whatsappMessageId:acceptedMessageId},
+            orderBy:{eventAt:"desc"},
+            select:{status:true,eventAt:true},
+          });
+          const terminalStatus = earlyStatus.find((event)=>["READ","DELIVERED","FAILED"].includes(event.status));
+          if(terminalStatus){
+            await prisma.whatsAppCampaignRecipient.updateMany({
+              where:{id:recipient.id,shop:campaign.shop,whatsappMessageId:acceptedMessageId,status:"SENT"},
+              data:{
+                status:terminalStatus.status,
+                ...(terminalStatus.status==="DELIVERED"?{deliveredAt:terminalStatus.eventAt}:{}),
+                ...(terminalStatus.status==="READ"?{readAt:terminalStatus.eventAt}:{}),
+                ...(terminalStatus.status==="FAILED"?{failedAt:terminalStatus.eventAt}:{}),
+              },
+            });
+          }
         }
       } catch {
         await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"FAILED",error:"Template mapping or send preparation failed; review the mapping before retrying.",failedAt:new Date()}});
