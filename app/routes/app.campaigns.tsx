@@ -29,19 +29,23 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const search = (url.searchParams.get("q") ?? "").trim().slice(0, 120);
   const orderedOnly = url.searchParams.get("ordered") !== "false";
-  const [templates, customers, orderCount, campaigns] = await Promise.all([
+  const cursor = url.searchParams.get("cursor") ?? undefined;
+  const customerWhere = { shop: session.shop, ...(orderedOnly ? { numberOfOrders: { gt: 0 } } : {}), ...(search ? { OR: [{firstName:{contains:search}},{lastName:{contains:search}},{email:{contains:search}},{phone:{contains:search}},{orders:{some:{orderName:{contains:search}}}}] } : {}) };
+  const [templates, customers, customerCount, orderCount, campaigns] = await Promise.all([
     prisma.approvedWhatsAppTemplate.findMany({ where: { shop: session.shop }, orderBy: [{name:"asc"},{language:"asc"}] }),
     prisma.shopifyCustomerMirror.findMany({
-      where: { shop: session.shop, ...(orderedOnly ? { numberOfOrders: { gt: 0 } } : {}), ...(search ? { OR: [{firstName:{contains:search}},{lastName:{contains:search}},{email:{contains:search}},{phone:{contains:search}},{orders:{some:{orderName:{contains:search}}}}] } : {}) },
-      orderBy: [{ updatedAtShopify: "desc" }, { lastName: "asc" }],
-      take: 2000,
+      where: customerWhere,
+      orderBy: [{ updatedAtShopify: "desc" }, { lastName: "asc" }, { id: "asc" }],
+      take: 50,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       include: { orders: { orderBy: [{processedAt:"desc"},{createdAtShopify:"desc"}], take: 1 } },
     }),
+    prisma.shopifyCustomerMirror.count({ where: customerWhere }),
     prisma.shopifyOrderMirror.count({ where: { shop: session.shop } }),
     prisma.whatsAppCampaign.findMany({ where: { shop: session.shop }, orderBy: { createdAt: "desc" }, take: 50, include: { recipients: { select: { status: true } } } }),
   ]);
   return {
-    search, orderedOnly, templates: templates.map(t => ({id:t.id,name:t.name,language:t.language,category:t.category,components:t.components})),
+    search, orderedOnly, nextCursor: customers.length === 50 ? customers[customers.length - 1]?.id ?? null : null, customerCount, templates: templates.map(t => ({id:t.id,name:t.name,language:t.language,category:t.category,components:t.components})),
     customers: customers.map(c => ({...c,tags:JSON.parse(c.tagsJson || "[]") as string[],latestOrder:c.orders[0]??null})),
     orderCount,
     campaigns: campaigns.map(c => ({id:c.id,name:c.name,status:c.status,audienceCount:c.audienceCount,scheduledAt:c.scheduledAt,templateName:c.templateName,counts:c.recipients.reduce((acc,r)=>({...acc,[r.status]:(acc[r.status]??0)+1}),{} as Record<string,number>)})),
@@ -172,12 +176,13 @@ export default function CampaignCenter() {
   return <s-page heading="Customer & Campaign Center"><div style={{maxWidth:1400,margin:"0 auto",padding:20,color:"var(--bc-text, #222)"}}>
     <h1>Shopify customers → WhatsApp campaigns</h1>
     <p>Synced customer and order records, full-store search, bulk selection, approved template mapping and scheduled campaign drafts.</p>
-    <syncFetcher.Form method="post" style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:16}}><input type="hidden" name="intent" value="sync"/><button style={style} disabled={syncFetcher.state!=="idle"}>Sync all Shopify customers & orders</button><span>{data.customers.length.toLocaleString("en-IN")} matching local customers · {data.orderCount.toLocaleString("en-IN")} local orders</span></syncFetcher.Form>
+    <syncFetcher.Form method="post" style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:16}}><input type="hidden" name="intent" value="sync"/><button style={style} disabled={syncFetcher.state!=="idle"}>Sync all Shopify customers & orders</button><span>{data.customerCount.toLocaleString("en-IN")} matching local customers · showing {data.customers.length} on this page · {data.orderCount.toLocaleString("en-IN")} local orders</span></syncFetcher.Form>
     {syncFetcher.data?.message && <p role="status">{syncFetcher.data.message}</p>}{syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{syncFetcher.data.error}</p>}{typeof fetcher.data?.success === "string" && <p role="status">{fetcher.data.success}</p>}{fetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{fetcher.data.error}</p>}{typeof consentFetcher.data?.success === "string" && <p role="status">{consentFetcher.data.success}</p>}{consentFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{consentFetcher.data.error}</p>}
     <form method="get" style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}><input name="q" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search name, email, phone, order ID" style={{...style,flex:1,minWidth:220}}/><label style={{display:"flex",gap:6,alignItems:"center"}}><input type="checkbox" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label><input type="hidden" name="ordered" value={String(orderedOnly)}/><button style={style}>Search</button></form>
     <fetcher.Form method="post" onSubmit={e=>{if(!window.confirm("Save a campaign for the selected audience? Only recipients with verified WhatsApp opt-in are eligible.")){e.preventDefault();return;}}}>
       <input type="hidden" name="intent" value="create-campaign"/><input type="hidden" name="selectAllMatching" value={String(selectAllMatching)}/><input type="hidden" name="audienceSearch" value={query}/><input type="hidden" name="orderedOnly" value={String(orderedOnly)}/>{selected.map(id=><input key={id} type="hidden" name="customerId" value={id}/>)}
-      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}><button type="button" style={style} onClick={()=>{setSelected(data.customers.map(c=>c.id));setSelectAllMatching(true)}}>Select all matching ({data.customers.length})</button><button type="button" style={style} onClick={()=>{setSelected([]);setSelectAllMatching(false)}}>Clear selection</button><strong>{selected.length} selected</strong></div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}><button type="button" style={style} onClick={()=>{setSelected(data.customers.map(c=>c.id));setSelectAllMatching(true)}}>Select all matching ({data.customerCount})</button><button type="button" style={style} onClick={()=>{setSelected([]);setSelectAllMatching(false)}}>Clear selection</button><strong>{selected.length} selected</strong></div>
+      {data.nextCursor && <div style={{display:"flex",justifyContent:"flex-end",marginBottom:10}}><a href={`?q=${encodeURIComponent(data.search)}&ordered=${String(data.orderedOnly)}&cursor=${encodeURIComponent(data.nextCursor)}`} style={{...style,textDecoration:"none"}}>Next 50 customers →</a></div>}
       <div style={{overflowX:"auto",border:"1px solid #d0d5dd",borderRadius:8,marginBottom:20}}><table style={{borderCollapse:"collapse",width:"100%",minWidth:900}}><thead><tr>{["Select","Customer","Email","Phone","Orders","Latest order","WhatsApp consent"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.customers.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}><input type="checkbox" checked={selected.includes(c.id)} onChange={e=>{setSelectAllMatching(false);setSelected(old=>e.target.checked?[...new Set([...old,c.id])]:old.filter(id=>id!==c.id))}}/></td><td style={{padding:10}}>{[c.firstName,c.lastName].filter(Boolean).join(" ")||"Unnamed"}</td><td style={{padding:10}}>{c.email||"—"}</td><td style={{padding:10}}>{c.phone||"—"}</td><td style={{padding:10}}>{c.numberOfOrders}</td><td style={{padding:10}}>{c.latestOrder?.orderName||"—"}</td><td style={{padding:10}}><button style={style} type="button" onClick={()=>{const consentData=new FormData();consentData.set("intent","consent");consentData.set("customerId",c.id);consentData.set("optedIn",String(!c.whatsappOptIn));consentFetcher.submit(consentData,{method:"post"});}}>{c.whatsappOptIn?"Opted in ✓":"Record verified opt-in"}</button></td></tr>)}</tbody></table></div>
       <h2>Create campaign</h2><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
       <label>Campaign name<input name="name" value={name} onChange={e=>setName(e.target.value)} style={{...style,width:"100%",marginTop:6}}/></label>
