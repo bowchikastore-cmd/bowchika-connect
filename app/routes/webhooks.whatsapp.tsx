@@ -147,6 +147,36 @@ const processIncomingMessage = async (
           createdAt: receivedAt,
         },
       });
+
+      // A clear inbound opt-out immediately revokes local campaign eligibility.
+      // Never infer opt-in from inbound keywords; explicit consent must be recorded separately.
+      const inboundText = getMessageText(message, rawType).trim();
+      if (/^(stop|unsubscribe|opt\\s*out|cancel|quit)$/i.test(inboundText)) {
+        const mirroredCustomers = await transaction.shopifyCustomerMirror.findMany({
+          where: { shop },
+          select: { id: true, phone: true },
+        });
+        const matchingCustomerIds = mirroredCustomers
+          .filter((customer) => normalizeE164Phone(customer.phone ?? "") === phoneNumber)
+          .map((customer) => customer.id);
+        if (matchingCustomerIds.length) {
+          await transaction.shopifyCustomerMirror.updateMany({
+            where: { shop, id: { in: matchingCustomerIds } },
+            data: { whatsappOptIn: false },
+          });
+          await transaction.whatsAppCampaignRecipient.updateMany({
+            where: {
+              shop,
+              customerId: { in: matchingCustomerIds },
+              status: "QUEUED",
+            },
+            data: {
+              status: "SKIPPED",
+              error: "Customer opted out via WhatsApp.",
+            },
+          });
+        }
+      }
     });
   } catch (error) {
     if (!isUniqueConstraintError(error)) throw error;
@@ -276,6 +306,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               status: { in: [...transition.allowed] },
             },
             data: { status: transition.status },
+          });
+          const campaignStatusData: { status: string; deliveredAt?: Date; readAt?: Date; failedAt?: Date } = {
+            status: transition.status,
+            ...(transition.status === "DELIVERED" ? { deliveredAt: eventAt } : {}),
+            ...(transition.status === "READ" ? { readAt: eventAt } : {}),
+            ...(transition.status === "FAILED" ? { failedAt: eventAt } : {}),
+          };
+          await transaction.whatsAppCampaignRecipient.updateMany({
+            where: { shop, whatsappMessageId, status: { in: [...transition.allowed] } },
+            data: campaignStatusData,
           });
         });
       }
