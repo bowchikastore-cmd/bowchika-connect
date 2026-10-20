@@ -57,6 +57,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     let customerCount = 0;
     let orderAfter: string | undefined;
     let orderCount = 0;
+    const seenCustomerCursors = new Set<string>();
+    const seenOrderCursors = new Set<string>();
     try {
       do {
         const response = await admin.graphql(customerQuery, { variables: { after: customerAfter ?? null }, signal: AbortSignal.timeout(20000) });
@@ -71,7 +73,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           });
           customerCount++;
         }
-        customerAfter = connection?.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : undefined;
+        const nextCursor = connection?.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : null;
+        if (connection?.pageInfo?.hasNextPage && (!nextCursor || seenCustomerCursors.has(nextCursor))) {
+          throw new Error("Shopify customer pagination returned a missing or repeated cursor.");
+        }
+        if (nextCursor) seenCustomerCursors.add(nextCursor);
+        customerAfter = nextCursor ?? undefined;
       } while (customerAfter);
       do {
         const response = await admin.graphql(orderQuery, { variables: { after: orderAfter ?? null }, signal: AbortSignal.timeout(20000) });
@@ -89,7 +96,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           });
           orderCount++;
         }
-        orderAfter = connection?.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : undefined;
+        const nextCursor = connection?.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : null;
+        if (connection?.pageInfo?.hasNextPage && (!nextCursor || seenOrderCursors.has(nextCursor))) {
+          throw new Error("Shopify order pagination returned a missing or repeated cursor.");
+        }
+        if (nextCursor) seenOrderCursors.add(nextCursor);
+        orderAfter = nextCursor ?? undefined;
       } while (orderAfter);
       return json({success:true, message:`Sync complete: ${customerCount} customer records and ${orderCount} order records processed.`});
     } catch {
