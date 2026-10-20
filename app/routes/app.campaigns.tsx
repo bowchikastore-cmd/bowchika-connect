@@ -128,8 +128,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const search = field(data, "audienceSearch").slice(0,120);
     const orderedOnly = field(data, "orderedOnly") !== "false";
     const where = { shop: session.shop, ...(orderedOnly ? { numberOfOrders: { gt: 0 } } : {}), ...(search ? { OR: [{firstName:{contains:search}},{lastName:{contains:search}},{email:{contains:search}},{phone:{contains:search}},{orders:{some:{orderName:{contains:search}}}}] } : {}) };
-    const ids = selectAllMatching ? (await prisma.shopifyCustomerMirror.findMany({ where, select: { id: true }, orderBy: { id: "asc" } })).map(c => c.id) : selectedIds;
-    if (!ids.length) return json({error:"Select at least one customer."},400);
+    if (!selectAllMatching && !selectedIds.length) return json({error:"Select at least one customer."},400);
     const template = await prisma.approvedWhatsAppTemplate.findFirst({where:{id:templateId,shop:session.shop}});
     if (!template) return json({error:"Choose a synced approved WhatsApp template."},400);
     let scheduledAt: Date | null = null;
@@ -143,15 +142,73 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     const mapping: Record<string,string> = {};
     for (const [key,value] of data.entries()) { if (key.startsWith("map_")) mapping[key.slice(4)] = String(value).slice(0,100); else if (key.startsWith("custom_")) mapping["custom."+key.slice(7)] = String(value).slice(0,1024); }
-    const customers = await prisma.shopifyCustomerMirror.findMany({where:{shop:session.shop,id:{in:ids}},orderBy:{updatedAtShopify:"desc"},include:{orders:{orderBy:{processedAt:"desc"},take:1}}});
-    const recipients = customers.filter(c=>c.whatsappOptIn && normalizeE164Phone(c.phone ?? "")).map(c=>({
-      shop:session.shop, customerId:c.id, phoneNumber:normalizeE164Phone(c.phone ?? "")!, customerName:[c.firstName,c.lastName].filter(Boolean).join(" ") || null,
-      snapshotJson:JSON.stringify({firstName:c.firstName??"",lastName:c.lastName??"",name:[c.firstName,c.lastName].filter(Boolean).join(" "),email:c.email??"",phone:c.phone??"",numberOfOrders:c.numberOfOrders,amountSpent:c.amountSpent,currencyCode:c.currencyCode,tags:JSON.parse(c.tagsJson||"[]"),latestOrder:c.orders[0]??null}),
-      status:"QUEUED",
-    }));
-    if (!recipients.length) return json({error:"No selected customer has both a valid phone number and verified WhatsApp opt-in recorded in Bowchika Connect. No campaign was created."},400);
-    const campaign = await prisma.whatsAppCampaign.create({data:{shop:session.shop,name,templateId:template.id,templateName:template.name,templateLanguage:template.language,templateComponents:template.components,variableMappingJson:JSON.stringify(mapping),mediaUrl,scheduledAt,status:scheduledAt?"SCHEDULED":"QUEUED",audienceCount:recipients.length,recipients:{create:recipients}}});
-    return json({success:`Campaign saved for ${recipients.length} opted-in customers. ${scheduledAt ? "Scheduled for "+scheduledAt.toLocaleString("en-IN") : "Queued for sending"}. Sending worker must be active before any message is sent.`,campaignId:campaign.id});
+    const audienceWhere = selectAllMatching
+      ? { ...where, whatsappOptIn: true }
+      : { shop: session.shop, id: { in: selectedIds }, whatsappOptIn: true };
+    const campaign = await prisma.whatsAppCampaign.create({data:{
+      shop:session.shop,name,templateId:template.id,templateName:template.name,
+      templateLanguage:template.language,templateComponents:template.components,
+      variableMappingJson:JSON.stringify(mapping),mediaUrl,scheduledAt,status:"PREPARING",audienceCount:0,
+    }});
+    let recipientCount = 0;
+    let afterId: string | undefined;
+    const seenPhones = new Set<string>();
+    try {
+      while (true) {
+        const customers = await prisma.shopifyCustomerMirror.findMany({
+          where: audienceWhere,
+          orderBy: { id: "asc" },
+          take: 500,
+          ...(afterId ? { cursor: { id: afterId }, skip: 1 } : {}),
+          include: { orders: { orderBy: [{processedAt:"desc"},{createdAtShopify:"desc"}], take: 1 } },
+        });
+        if (!customers.length) break;
+        const recipients = customers.flatMap((customer) => {
+          const phoneNumber = normalizeE164Phone(customer.phone ?? "");
+          if (!phoneNumber || seenPhones.has(phoneNumber)) return [];
+          seenPhones.add(phoneNumber);
+          let tags: string[] = [];
+          try { tags = JSON.parse(customer.tagsJson || "[]") as string[]; } catch { tags = []; }
+          return [{
+            shop: session.shop,
+            campaignId: campaign.id,
+            customerId: customer.id,
+            phoneNumber,
+            customerName: [customer.firstName, customer.lastName].filter(Boolean).join(" ") || null,
+            snapshotJson: JSON.stringify({
+              firstName: customer.firstName ?? "",
+              lastName: customer.lastName ?? "",
+              name: [customer.firstName, customer.lastName].filter(Boolean).join(" "),
+              email: customer.email ?? "",
+              phone: customer.phone ?? "",
+              numberOfOrders: customer.numberOfOrders,
+              amountSpent: customer.amountSpent,
+              currencyCode: customer.currencyCode,
+              tags,
+              latestOrder: customer.orders[0] ?? null,
+            }),
+            status: "QUEUED",
+          }];
+        });
+        if (recipients.length) {
+          await prisma.whatsAppCampaignRecipient.createMany({ data: recipients });
+          recipientCount += recipients.length;
+          await prisma.whatsAppCampaign.update({ where: { id: campaign.id }, data: { audienceCount: recipientCount } });
+        }
+        afterId = customers[customers.length - 1]?.id;
+        if (customers.length < 500 || !afterId) break;
+      }
+    } catch {
+      await prisma.whatsAppCampaign.update({where:{id:campaign.id},data:{status:"FAILED"}});
+      return json({error:"Campaign audience preparation failed. The campaign was not queued for sending; review the local customer data and retry."},500);
+    }
+    if (!recipientCount) {
+      await prisma.whatsAppCampaign.delete({where:{id:campaign.id}});
+      return json({error:"No matching customer has both a valid phone number and verified WhatsApp opt-in recorded in Bowchika Connect. No campaign was queued."},400);
+    }
+    const finalStatus = scheduledAt ? "SCHEDULED" : "QUEUED";
+    await prisma.whatsAppCampaign.update({where:{id:campaign.id},data:{status:finalStatus}});
+    return json({success:`Campaign saved for ${recipientCount} opted-in customers. ${scheduledAt ? "Scheduled for "+scheduledAt.toLocaleString("en-IN") : "Queued for sending"}. Sending worker must be active before any message is sent.`,campaignId:campaign.id});
   }
   return json({error:"Unknown action."},400);
 };
