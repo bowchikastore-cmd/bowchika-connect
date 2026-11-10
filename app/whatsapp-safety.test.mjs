@@ -432,10 +432,20 @@ try {
       });
       assert.equal(response.status, 200);
     }
-    const duplicateRead = await sendEvent({
-      statuses: [{ id: deliveredId, status: "read", timestamp }],
-    });
-    assert.equal(duplicateRead.status, 200);
+    const concurrentDuplicateReads = await Promise.all([
+      sendEvent({ statuses: [{ id: deliveredId, status: "read", timestamp }] }),
+      sendEvent({ statuses: [{ id: deliveredId, status: "read", timestamp }] }),
+    ]);
+    assert.deepEqual(
+      concurrentDuplicateReads.map((response) => response.status),
+      [200, 200],
+    );
+    assert.equal(
+      await prisma.whatsAppMessageStatusEvent.count({
+        where: { shop, whatsappMessageId: deliveredId, status: "READ" },
+      }),
+      1,
+    );
     assert.equal(
       (
         await prisma.whatsAppMessage.findUniqueOrThrow({
