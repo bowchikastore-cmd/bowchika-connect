@@ -87,7 +87,8 @@ export const action=async({request}:ActionFunctionArgs)=>{
         if(result.error) {
           await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"FAILED",error:"WhatsApp provider rejected or could not accept this message.",failedAt:new Date()}});
         } else {
-          const acceptedMessageId = result.pendingMessage.messageId;
+          const acceptedMessageId = result.whatsappMessageId;
+          if (!acceptedMessageId) throw new Error("WhatsApp provider message ID was not returned.");
           await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"SENT",whatsappMessageId:acceptedMessageId,sentAt:new Date(),error:null}});
           // Reconcile a status webhook that arrived before the send response persisted its message ID.
           const earlyStatus = await prisma.whatsAppMessageStatusEvent.findMany({
