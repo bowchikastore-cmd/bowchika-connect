@@ -26,6 +26,10 @@ services:
         value: 2dcdue-dq.myshopify.com
       - key: WHATSAPP_INBOX_SENDING_ENABLED
         value: "false"
+      - key: WHATSAPP_CAMPAIGN_SENDING_ENABLED
+        value: "false"
+      - key: CAMPAIGN_WORKER_SECRET
+        sync: false
       - key: WHATSAPP_PHONE_NUMBER_ID
         sync: false
       - key: WHATSAPP_BUSINESS_ACCOUNT_ID
