@@ -40,6 +40,8 @@ jobs:
         run: npm run lint
       - name: WhatsApp safety and webhook tests
         run: npx vite-node app/whatsapp-safety.test.mjs
+      - name: Shopify sync checkpoint tests
+        run: npx vite-node app/shopify-sync.test.mjs
       - name: Production build
         run: npm run build
 
@@ -87,5 +89,7 @@ jobs:
         run: npx prisma migrate status --schema prisma/postgresql/schema.prisma
       - name: Typecheck against PostgreSQL generated client
         run: npm run typecheck
+      - name: Shopify sync checkpoint tests against PostgreSQL
+        run: npx vite-node app/shopify-sync.test.mjs
       - name: Build against PostgreSQL generated client
         run: npm run build
