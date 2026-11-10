@@ -29,11 +29,13 @@ process.env.WHATSAPP_TEST_RECIPIENT_PHONE = recipient;
 process.env.WHATSAPP_TEST_SENDING_ENABLED = "false";
 process.env.WHATSAPP_INBOX_SENDING_ENABLED = "false";
 process.env.WHATSAPP_CAMPAIGN_SENDING_ENABLED = "false";
+process.env.CAMPAIGN_WORKER_SECRET = "local-only-campaign-worker-secret-with-32-plus-characters";
 process.env.WHATSAPP_LIVE_SENDING_ENABLED = "false";
 
-const [{ loader, action }, { default: prisma }, whatsappServer] =
+const [{ loader, action }, { loader: campaignWorkerLoader, action: campaignWorkerAction }, { default: prisma }, whatsappServer] =
   await Promise.all([
     import("./routes/webhooks.whatsapp.tsx"),
+    import("./routes/api.campaign-worker.tsx"),
     import("./db.server.ts"),
     import("./whatsapp.server.ts"),
   ]);
@@ -111,6 +113,39 @@ try {
     assert.equal(isWhatsAppCampaignSendingEnabled(), true);
     process.env.WHATSAPP_CAMPAIGN_SENDING_ENABLED = "false";
     assert.equal(isWhatsAppCampaignSendingEnabled(), false);
+  });
+
+  await check("campaign worker requires its own secret and remains disabled by default", async () => {
+    const unauthorized = await campaignWorkerAction({
+      request: new Request("https://local.test/api/campaign-worker", {
+        method: "POST",
+        headers: { Authorization: "Bearer wrong-secret" },
+      }),
+    });
+    assert.equal(unauthorized.status, 404);
+
+    process.env.WHATSAPP_INBOX_SENDING_ENABLED = "true";
+    process.env.WHATSAPP_CAMPAIGN_SENDING_ENABLED = "false";
+    const blocked = await campaignWorkerAction({
+      request: new Request("https://local.test/api/campaign-worker", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.CAMPAIGN_WORKER_SECRET}`,
+        },
+      }),
+    });
+    assert.equal(blocked.status, 503);
+    process.env.WHATSAPP_INBOX_SENDING_ENABLED = "false";
+
+    const health = await campaignWorkerLoader({
+      request: new Request("https://local.test/api/campaign-worker", {
+        headers: {
+          Authorization: `Bearer ${process.env.CAMPAIGN_WORKER_SECRET}`,
+        },
+      }),
+    });
+    assert.equal(health.status, 200);
+    process.env.WHATSAPP_CAMPAIGN_SENDING_ENABLED = "false";
   });
 
   const templateComponents = JSON.stringify([
