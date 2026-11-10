@@ -40,5 +40,56 @@ jobs:
         run: npm run lint
       - name: WhatsApp safety and webhook tests
         run: npx vite-node app/whatsapp-safety.test.mjs
+      - name: Shopify sync checkpoint tests
+        run: npx vite-node app/shopify-sync.test.mjs
       - name: Production build
+        run: npm run build
+
+  verify-postgresql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bowchika_connect
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d bowchika_connect"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/bowchika_connect?schema=public
+      DATABASE_URL_UNPOOLED: postgresql://postgres:postgres@localhost:5432/bowchika_connect?schema=public
+      SHOPIFY_API_KEY: ci-placeholder-key
+      SHOPIFY_API_SECRET: ci-placeholder-secret
+      SCOPES: read_customers,read_orders
+      SHOPIFY_APP_URL: https://example.invalid
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --include=dev
+      - name: Validate PostgreSQL Prisma schema
+        run: npx prisma validate --schema prisma/postgresql/schema.prisma
+      - name: Generate PostgreSQL Prisma client
+        run: npx prisma generate --schema prisma/postgresql/schema.prisma
+      - name: Apply PostgreSQL migrations to an isolated CI database
+        run: npx prisma migrate deploy --schema prisma/postgresql/schema.prisma
+      - name: Verify PostgreSQL migration state
+        run: npx prisma migrate status --schema prisma/postgresql/schema.prisma
+      - name: Typecheck against PostgreSQL generated client
+        run: npm run typecheck
+      - name: Shopify sync checkpoint tests against PostgreSQL
+        run: npx vite-node app/shopify-sync.test.mjs
+      - name: Build against PostgreSQL generated client
         run: npm run build

@@ -36,6 +36,7 @@ export default function App() {
           </header>
           <s-app-nav>
             <s-link {...workspaceLinkProps}>Workspace</s-link>
+            <s-link href="/app/campaigns">Customers &amp; Campaigns</s-link>
             <s-link href="/app/inbox">Inbox</s-link>
             <s-link href="/app/settings">Settings</s-link>
           </s-app-nav>
