@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { randomUUID } from "node:crypto";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
@@ -8,7 +9,43 @@ import { normalizeE164Phone, getWhatsAppTemplateRequirements } from "../whatsapp
 const json = (body: object, status = 200) => Response.json(body, { status });
 const field = (data: FormData, key: string) => String(data.get(key) ?? "").trim();
 
-type CampaignActionData = { success?: boolean | string; message?: string; error?: string; campaignId?: string };
+type CampaignActionData = {
+  success?: boolean | string;
+  message?: string;
+  error?: string;
+  campaignId?: string;
+  syncJobId?: string;
+  syncPhase?: string;
+  customersProcessed?: number;
+  ordersProcessed?: number;
+  ordersSkipped?: number;
+  hasMore?: boolean;
+  continuation?: string;
+};
+type ShopifyCustomerNode = {
+  id: string;
+  firstName: string | null;
+  lastName: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  tags: string[];
+  numberOfOrders: number;
+  defaultEmailAddress?: { emailAddress: string | null } | null;
+  defaultPhoneNumber?: { phoneNumber: string | null } | null;
+  amountSpent?: { amount: string; currencyCode: string } | null;
+};
+type ShopifyOrderNode = {
+  id: string;
+  name: string;
+  number: number | null;
+  createdAt: string | null;
+  processedAt: string | null;
+  displayFinancialStatus: string | null;
+  displayFulfillmentStatus: string | null;
+  customer?: { id: string } | null;
+  totalPriceSet?: { shopMoney?: { amount: string; currencyCode: string } | null } | null;
+  lineItems?: { nodes?: Array<{ name: string; quantity: number; sku: string | null; variantTitle: string | null }> | null } | null;
+};
 const customerQuery = `#graphql
 query BowchikaCustomerMirror($after: String) {
   customers(first: 100, after: $after, sortKey: CREATED_AT) {
@@ -43,12 +80,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     prisma.shopifyCustomerMirror.count({ where: customerWhere }),
     prisma.shopifyOrderMirror.count({ where: { shop: session.shop } }),
     prisma.whatsAppCampaign.findMany({ where: { shop: session.shop }, orderBy: { createdAt: "desc" }, take: 50, include: { recipients: { select: { status: true } } } }),
+    prisma.shopifySyncJob.findUnique({ where: { id: session.shop } }),
   ]);
   return {
     search, orderedOnly, nextCursor: customers.length === 50 ? customers[customers.length - 1]?.id ?? null : null, customerCount, templates: templates.map(t => ({id:t.id,name:t.name,language:t.language,category:t.category,components:t.components})),
     customers: customers.map(c => ({...c,tags:JSON.parse(c.tagsJson || "[]") as string[],latestOrder:c.orders[0]??null})),
     orderCount,
     campaigns: campaigns.map(c => ({id:c.id,name:c.name,status:c.status,audienceCount:c.audienceCount,scheduledAt:c.scheduledAt,templateName:c.templateName,counts:c.recipients.reduce((acc,r)=>({...acc,[r.status]:(acc[r.status]??0)+1}),{} as Record<string,number>)})),
+    syncJob,
   };
 };
 
@@ -56,60 +95,263 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const data = await request.formData();
   const intent = field(data, "intent");
-  if (intent === "sync") {
-    let customerAfter: string | undefined;
-    let customerCount = 0;
-    let orderAfter: string | undefined;
-    let orderCount = 0;
-    const seenCustomerCursors = new Set<string>();
-    const seenOrderCursors = new Set<string>();
+  if (intent === "sync" || intent === "sync-next") {
+    const shop = session.shop;
+    let job = await prisma.shopifySyncJob.findUnique({ where: { id: shop } });
+
+    if (intent === "sync") {
+      if (!job || job.status === "COMPLETED") {
+        job = await prisma.shopifySyncJob.upsert({
+          where: { id: shop },
+          create: {
+            id: shop,
+            shop,
+            status: "RUNNING",
+            phase: "CUSTOMERS",
+          },
+          update: {
+            status: "RUNNING",
+            phase: "CUSTOMERS",
+            customerCursor: null,
+            orderCursor: null,
+            customersProcessed: 0,
+            ordersProcessed: 0,
+            ordersSkipped: 0,
+            customerPages: 0,
+            orderPages: 0,
+            lastError: null,
+            leaseToken: null,
+            leaseExpiresAt: null,
+            startedAt: new Date(),
+            completedAt: null,
+          },
+        });
+      }
+    } else if (!job || job.status !== "RUNNING" || field(data, "jobId") !== shop) {
+      return json({ error: "No resumable Shopify sync job was found. Start a new sync." }, 409);
+    }
+
+    if (!job || job.status !== "RUNNING") {
+      return json({ error: "Shopify sync could not be started." }, 500);
+    }
+
+    const leaseToken = randomUUID();
+    const leaseStartedAt = new Date();
+    const lease = await prisma.shopifySyncJob.updateMany({
+      where: {
+        id: shop,
+        shop,
+        status: "RUNNING",
+        OR: [
+          { leaseExpiresAt: null },
+          { leaseExpiresAt: { lt: leaseStartedAt } },
+        ],
+      },
+      data: {
+        leaseToken,
+        leaseExpiresAt: new Date(leaseStartedAt.getTime() + 120_000),
+        lastError: null,
+      },
+    });
+    if (lease.count !== 1) {
+      return json({ error: "A sync batch is already running. Wait briefly, then resume the sync." }, 409);
+    }
+
+    job = await prisma.shopifySyncJob.findUnique({ where: { id: shop } });
+    if (!job || job.leaseToken !== leaseToken) {
+      return json({ error: "The sync lease could not be confirmed. Resume the sync." }, 409);
+    }
+
     try {
-      do {
-        const response = await admin.graphql(customerQuery, { variables: { after: customerAfter ?? null }, signal: AbortSignal.timeout(20000) });
-        const result = await response.json() as { errors?: unknown[]; data?: { customers?: { nodes?: Array<{ id:string; firstName:string|null; lastName:string|null; createdAt:string|null; updatedAt:string|null; tags:string[]; numberOfOrders:number; defaultEmailAddress?:{emailAddress:string|null}|null; defaultPhoneNumber?:{phoneNumber:string|null}|null; amountSpent?:{amount:string;currencyCode:string}|null }>; pageInfo?:{hasNextPage:boolean;endCursor:string|null} }; orders?: { nodes?: Array<{ id:string; name:string; number:number|null; createdAt:string|null; processedAt:string|null; displayFinancialStatus:string|null; displayFulfillmentStatus:string|null; customer?:{id:string}|null; totalPriceSet?:{shopMoney?:{amount:string;currencyCode:string}|null}|null; lineItems?:{nodes?:Array<{name:string;quantity:number;sku:string|null;variantTitle:string|null}>}|null }>; pageInfo?:{hasNextPage:boolean;endCursor:string|null} } } };
-        if (result.errors?.length) throw new Error("Shopify customer sync query failed.");
-        const connection = result.data?.customers;
-        for (const c of connection?.nodes ?? []) {
-          await prisma.shopifyCustomerMirror.upsert({
-            where: { id: c.id },
-            create: { id:c.id, shop:session.shop, firstName:c.firstName, lastName:c.lastName, email:c.defaultEmailAddress?.emailAddress ?? null, phone:c.defaultPhoneNumber?.phoneNumber ?? null, numberOfOrders:Number(c.numberOfOrders ?? 0), amountSpent:Number(c.amountSpent?.amount ?? 0), currencyCode:c.amountSpent?.currencyCode ?? "INR", tagsJson:JSON.stringify(c.tags ?? []), createdAtShopify:c.createdAt ? new Date(c.createdAt) : null, updatedAtShopify:c.updatedAt ? new Date(c.updatedAt) : null },
-            update: { firstName:c.firstName, lastName:c.lastName, email:c.defaultEmailAddress?.emailAddress ?? null, phone:c.defaultPhoneNumber?.phoneNumber ?? null, numberOfOrders:Number(c.numberOfOrders ?? 0), amountSpent:Number(c.amountSpent?.amount ?? 0), currencyCode:c.amountSpent?.currencyCode ?? "INR", tagsJson:JSON.stringify(c.tags ?? []), createdAtShopify:c.createdAt ? new Date(c.createdAt) : null, updatedAtShopify:c.updatedAt ? new Date(c.updatedAt) : null, syncedAt:new Date() },
+      if (job.phase === "CUSTOMERS") {
+        const response = await admin.graphql(customerQuery, {
+          variables: { after: job.customerCursor ?? null },
+          signal: AbortSignal.timeout(20_000),
+        });
+        const result = await response.json() as {
+          errors?: unknown[];
+          data?: {
+            customers?: {
+              nodes?: ShopifyCustomerNode[];
+              pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+            };
+          };
+        };
+        if (result.errors?.length || !result.data?.customers?.pageInfo) {
+          throw new Error("Shopify customer page could not be read. Check customer access and retry.");
+        }
+
+        const connection = result.data.customers;
+        const customers = connection.nodes ?? [];
+        const now = new Date();
+        const writes = customers.map((customer) => {
+          const fields = {
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+            email: customer.defaultEmailAddress?.emailAddress ?? null,
+            phone: customer.defaultPhoneNumber?.phoneNumber ?? null,
+            numberOfOrders: Number(customer.numberOfOrders ?? 0),
+            amountSpent: Number(customer.amountSpent?.amount ?? 0),
+            currencyCode: customer.amountSpent?.currencyCode ?? "INR",
+            tagsJson: JSON.stringify(customer.tags ?? []),
+            createdAtShopify: customer.createdAt ? new Date(customer.createdAt) : null,
+            updatedAtShopify: customer.updatedAt ? new Date(customer.updatedAt) : null,
+            syncedAt: now,
+          };
+          return prisma.shopifyCustomerMirror.upsert({
+            where: { id: customer.id },
+            create: { id: customer.id, shop, ...fields },
+            update: fields,
           });
-          customerCount++;
+        });
+        if (writes.length) await prisma.$transaction(writes);
+
+        const hasNextPage = connection.pageInfo.hasNextPage;
+        const nextCursor = hasNextPage ? connection.pageInfo.endCursor : null;
+        if (hasNextPage && (!nextCursor || nextCursor === job.customerCursor)) {
+          throw new Error("Shopify customer pagination returned a missing or repeated cursor. Resume after checking the Shopify response.");
         }
-        const nextCursor = connection?.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : null;
-        if (connection?.pageInfo?.hasNextPage && (!nextCursor || seenCustomerCursors.has(nextCursor))) {
-          throw new Error("Shopify customer pagination returned a missing or repeated cursor.");
+        const nextPhase = hasNextPage ? "CUSTOMERS" : "ORDERS";
+        const saved = await prisma.shopifySyncJob.updateMany({
+          where: { id: shop, shop, leaseToken },
+          data: {
+            phase: nextPhase,
+            customerCursor: nextCursor,
+            customersProcessed: { increment: customers.length },
+            customerPages: { increment: 1 },
+            lastError: null,
+            leaseToken: null,
+            leaseExpiresAt: null,
+          },
+        });
+        if (saved.count !== 1) throw new Error("The sync checkpoint could not be saved. Resume is safe; this page uses idempotent upserts.");
+        const latest = await prisma.shopifySyncJob.findUniqueOrThrow({ where: { id: shop } });
+        return json({
+          message: "Customer sync progress: " + latest.customersProcessed.toLocaleString("en-IN") + " records across " + latest.customerPages + " pages. " + (hasNextPage ? "Continuing…" : "Customers complete; starting orders…"),
+          syncJobId: shop,
+          syncPhase: latest.phase,
+          customersProcessed: latest.customersProcessed,
+          ordersProcessed: latest.ordersProcessed,
+          ordersSkipped: latest.ordersSkipped,
+          hasMore: true,
+          continuation: latest.phase + "|" + (latest.customerCursor ?? "") + "|" + (latest.orderCursor ?? "") + "|" + latest.customerPages + "|" + latest.orderPages,
+        });
+      }
+
+      if (job.phase === "ORDERS") {
+        const response = await admin.graphql(orderQuery, {
+          variables: { after: job.orderCursor ?? null },
+          signal: AbortSignal.timeout(20_000),
+        });
+        const result = await response.json() as {
+          errors?: unknown[];
+          data?: {
+            orders?: {
+              nodes?: ShopifyOrderNode[];
+              pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+            };
+          };
+        };
+        if (result.errors?.length || !result.data?.orders?.pageInfo) {
+          throw new Error("Shopify order page could not be read. Check order access and retry.");
         }
-        if (nextCursor) seenCustomerCursors.add(nextCursor);
-        customerAfter = nextCursor ?? undefined;
-      } while (customerAfter);
-      do {
-        const response = await admin.graphql(orderQuery, { variables: { after: orderAfter ?? null }, signal: AbortSignal.timeout(20000) });
-        const result = await response.json() as { errors?: unknown[]; data?: { customers?: { nodes?: Array<{ id:string; firstName:string|null; lastName:string|null; createdAt:string|null; updatedAt:string|null; tags:string[]; numberOfOrders:number; defaultEmailAddress?:{emailAddress:string|null}|null; defaultPhoneNumber?:{phoneNumber:string|null}|null; amountSpent?:{amount:string;currencyCode:string}|null }>; pageInfo?:{hasNextPage:boolean;endCursor:string|null} }; orders?: { nodes?: Array<{ id:string; name:string; number:number|null; createdAt:string|null; processedAt:string|null; displayFinancialStatus:string|null; displayFulfillmentStatus:string|null; customer?:{id:string}|null; totalPriceSet?:{shopMoney?:{amount:string;currencyCode:string}|null}|null; lineItems?:{nodes?:Array<{name:string;quantity:number;sku:string|null;variantTitle:string|null}>}|null }>; pageInfo?:{hasNextPage:boolean;endCursor:string|null} } } };
-        if (result.errors?.length) throw new Error("Shopify order sync query failed.");
-        const connection = result.data?.orders;
-        for (const o of connection?.nodes ?? []) {
-          if (!o.customer?.id) continue;
-          const exists = await prisma.shopifyCustomerMirror.findFirst({ where: { id:o.customer.id, shop:session.shop }, select:{id:true} });
-          if (!exists) continue;
-          await prisma.shopifyOrderMirror.upsert({
-            where: { id:o.id },
-            create: { id:o.id, shop:session.shop, customerId:o.customer.id, orderName:o.name, orderNumber:o.number ?? null, createdAtShopify:o.createdAt ? new Date(o.createdAt) : null, processedAt:o.processedAt ? new Date(o.processedAt) : null, financialStatus:o.displayFinancialStatus ?? null, fulfillmentStatus:o.displayFulfillmentStatus ?? null, totalPrice:Number(o.totalPriceSet?.shopMoney?.amount ?? 0), currencyCode:o.totalPriceSet?.shopMoney?.currencyCode ?? "INR", lineItemsJson:JSON.stringify(o.lineItems?.nodes ?? []) },
-            update: { orderName:o.name, orderNumber:o.number ?? null, createdAtShopify:o.createdAt ? new Date(o.createdAt) : null, processedAt:o.processedAt ? new Date(o.processedAt) : null, financialStatus:o.displayFinancialStatus ?? null, fulfillmentStatus:o.displayFulfillmentStatus ?? null, totalPrice:Number(o.totalPriceSet?.shopMoney?.amount ?? 0), currencyCode:o.totalPriceSet?.shopMoney?.currencyCode ?? "INR", lineItemsJson:JSON.stringify(o.lineItems?.nodes ?? []), syncedAt:new Date() },
-          });
-          orderCount++;
+
+        const connection = result.data.orders;
+        const orders = connection.nodes ?? [];
+        const customerIds = [...new Set(orders.flatMap((order) => order.customer?.id ? [order.customer.id] : []))];
+        const customers = customerIds.length
+          ? await prisma.shopifyCustomerMirror.findMany({
+              where: { shop, id: { in: customerIds } },
+              select: { id: true },
+            })
+          : [];
+        const knownCustomerIds = new Set(customers.map((customer) => customer.id));
+        let skipped = 0;
+        const now = new Date();
+        const writes = orders.flatMap((order) => {
+          const customerId = order.customer?.id;
+          if (!customerId || !knownCustomerIds.has(customerId)) {
+            skipped++;
+            return [];
+          }
+          const fields = {
+            shop,
+            customerId,
+            orderName: order.name,
+            orderNumber: order.number ?? null,
+            createdAtShopify: order.createdAt ? new Date(order.createdAt) : null,
+            processedAt: order.processedAt ? new Date(order.processedAt) : null,
+            financialStatus: order.displayFinancialStatus ?? null,
+            fulfillmentStatus: order.displayFulfillmentStatus ?? null,
+            totalPrice: Number(order.totalPriceSet?.shopMoney?.amount ?? 0),
+            currencyCode: order.totalPriceSet?.shopMoney?.currencyCode ?? "INR",
+            lineItemsJson: JSON.stringify(order.lineItems?.nodes ?? []),
+            syncedAt: now,
+          };
+          return [prisma.shopifyOrderMirror.upsert({
+            where: { id: order.id },
+            create: { id: order.id, ...fields },
+            update: fields,
+          })];
+        });
+        if (writes.length) await prisma.$transaction(writes);
+
+        const hasNextPage = connection.pageInfo.hasNextPage;
+        const nextCursor = hasNextPage ? connection.pageInfo.endCursor : null;
+        if (hasNextPage && (!nextCursor || nextCursor === job.orderCursor)) {
+          throw new Error("Shopify order pagination returned a missing or repeated cursor. Resume after checking the Shopify response.");
         }
-        const nextCursor = connection?.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : null;
-        if (connection?.pageInfo?.hasNextPage && (!nextCursor || seenOrderCursors.has(nextCursor))) {
-          throw new Error("Shopify order pagination returned a missing or repeated cursor.");
-        }
-        if (nextCursor) seenOrderCursors.add(nextCursor);
-        orderAfter = nextCursor ?? undefined;
-      } while (orderAfter);
-      return json({success:true, message:`Sync complete: ${customerCount} customer records and ${orderCount} order records processed.`});
-    } catch {
-      return json({error:"Sync stopped before completion. Some records may already have been updated; retrying is safe because customer and order records are upserted."}, 500);
+        const saved = await prisma.shopifySyncJob.updateMany({
+          where: { id: shop, shop, leaseToken },
+          data: {
+            phase: "ORDERS",
+            orderCursor: nextCursor,
+            ordersProcessed: { increment: writes.length },
+            ordersSkipped: { increment: skipped },
+            orderPages: { increment: 1 },
+            lastError: null,
+            status: hasNextPage ? "RUNNING" : "COMPLETED",
+            completedAt: hasNextPage ? null : new Date(),
+            leaseToken: null,
+            leaseExpiresAt: null,
+          },
+        });
+        if (saved.count !== 1) throw new Error("The sync checkpoint could not be saved. Resume is safe; this page uses idempotent upserts.");
+        const latest = await prisma.shopifySyncJob.findUniqueOrThrow({ where: { id: shop } });
+        return json({
+          message: hasNextPage
+            ? "Order sync progress: " + latest.ordersProcessed.toLocaleString("en-IN") + " imported; " + latest.ordersSkipped.toLocaleString("en-IN") + " skipped. Continuing…"
+            : "Sync complete: " + latest.customersProcessed.toLocaleString("en-IN") + " customers, " + latest.ordersProcessed.toLocaleString("en-IN") + " orders imported, " + latest.ordersSkipped.toLocaleString("en-IN") + " orders skipped because they had no matching local customer.",
+          syncJobId: shop,
+          syncPhase: latest.phase,
+          customersProcessed: latest.customersProcessed,
+          ordersProcessed: latest.ordersProcessed,
+          ordersSkipped: latest.ordersSkipped,
+          hasMore: hasNextPage,
+          continuation: hasNextPage ? latest.phase + "|" + (latest.customerCursor ?? "") + "|" + (latest.orderCursor ?? "") + "|" + latest.customerPages + "|" + latest.orderPages : undefined,
+        });
+      }
+
+      throw new Error("Unknown Shopify sync phase. Start a new sync.");
+    } catch (error) {
+      console.error("Shopify customer/order sync batch failed", error);
+      const message = error instanceof Error ? error.message : "Unexpected Shopify sync error.";
+      await prisma.shopifySyncJob.updateMany({
+        where: { id: shop, shop, leaseToken },
+        data: {
+          lastError: message.slice(0, 1000),
+          leaseToken: null,
+          leaseExpiresAt: null,
+        },
+      });
+      return json({
+        error: message,
+        syncJobId: shop,
+        syncPhase: job.phase,
+        customersProcessed: job.customersProcessed,
+        ordersProcessed: job.ordersProcessed,
+        ordersSkipped: job.ordersSkipped,
+      }, 500);
     }
   }
   if (intent === "consent") {
@@ -218,6 +460,7 @@ export default function CampaignCenter() {
   const data = useLoaderData<typeof loader>();
   const fetcher = useFetcher<CampaignActionData>();
   const syncFetcher = useFetcher<CampaignActionData>();
+  const autoSyncContinuation = useRef<string | null>(null);
   const consentFetcher = useFetcher<CampaignActionData>();
   const [query,setQuery] = useState(data.search);
   const [selected,setSelected] = useState<string[]>([]);
@@ -227,6 +470,17 @@ export default function CampaignCenter() {
   const [name,setName] = useState("Bowchika customer campaign");
   const [scheduledAt,setScheduledAt] = useState("");
   const [mediaUrl,setMediaUrl] = useState("");
+  useEffect(() => {
+    const result = syncFetcher.data;
+    if (syncFetcher.state !== "idle" || !result?.hasMore || !result.syncJobId || !result.continuation) return;
+    if (autoSyncContinuation.current === result.continuation) return;
+    autoSyncContinuation.current = result.continuation;
+    syncFetcher.submit(
+      { intent: "sync-next", jobId: result.syncJobId },
+      { method: "post" },
+    );
+  }, [syncFetcher.state, syncFetcher.data, syncFetcher.submit]);
+
   const template = data.templates.find(t=>t.id===chosenTemplate);
   const requirements = useMemo(()=>{try{return template?getWhatsAppTemplateRequirements(template.components):null}catch{return null}},[template]);
   const fields = [{label:"Customer first name",value:"firstName"},{label:"Customer full name",value:"name"},{label:"Customer email",value:"email"},{label:"Customer phone",value:"phone"},{label:"Latest order number",value:"latestOrder.orderName"},{label:"Latest order total",value:"latestOrder.totalPrice"},{label:"Product name (latest order)",value:"latestOrder.productName"},{label:"Order count",value:"numberOfOrders"},{label:"Total spend",value:"amountSpent"},{label:"Custom text",value:"custom"}];
@@ -234,8 +488,17 @@ export default function CampaignCenter() {
   return <s-page heading="Customer & Campaign Center"><div style={{maxWidth:1400,margin:"0 auto",padding:20,color:"var(--bc-text, #222)"}}>
     <h1>Shopify customers → WhatsApp campaigns</h1>
     <p>Synced customer and order records, full-store search, bulk selection, approved template mapping and scheduled campaign drafts.</p>
-    <syncFetcher.Form method="post" style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:16}}><input type="hidden" name="intent" value="sync"/><button style={style} disabled={syncFetcher.state!=="idle"}>Sync all Shopify customers & orders</button><span>{data.customerCount.toLocaleString("en-IN")} matching local customers · showing {data.customers.length} on this page · {data.orderCount.toLocaleString("en-IN")} local orders</span></syncFetcher.Form>
-    {syncFetcher.data?.message && <p role="status">{syncFetcher.data.message}</p>}{syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{syncFetcher.data.error}</p>}{typeof fetcher.data?.success === "string" && <p role="status">{fetcher.data.success}</p>}{fetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{fetcher.data.error}</p>}{typeof consentFetcher.data?.success === "string" && <p role="status">{consentFetcher.data.success}</p>}{consentFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{consentFetcher.data.error}</p>}
+    <syncFetcher.Form method="post" onSubmit={() => { autoSyncContinuation.current = null; }} style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
+      <input type="hidden" name="intent" value="sync"/>
+      <button style={style} disabled={syncFetcher.state!=="idle"}>
+        {data.syncJob?.status === "RUNNING" ? "Resume customer & order sync" : "Sync all Shopify customers & orders"}
+      </button>
+      <span>{data.customerCount.toLocaleString("en-IN")} local customers · {data.orderCount.toLocaleString("en-IN")} local orders</span>
+    </syncFetcher.Form>
+    <p style={{fontSize:13,color:"#667085",marginTop:0}}>Sync runs in resumable 100-record Shopify pages. Keep this page open while it processes; after interruption, press Resume. Shopify exposes only the default recent 60-day order window unless the app receives read_all_orders approval.</p>
+    {(syncFetcher.data?.message || data.syncJob) && <p role="status">{syncFetcher.data?.message || ("Last sync: " + data.syncJob?.status + " · " + (data.syncJob?.customersProcessed ?? 0).toLocaleString("en-IN") + " customers · " + (data.syncJob?.ordersProcessed ?? 0).toLocaleString("en-IN") + " orders")}</p>}
+    {syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{syncFetcher.data.error}</p>}
+    {data.syncJob?.lastError && !syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{data.syncJob.lastError}</p>}{typeof fetcher.data?.success === "string" && <p role="status">{fetcher.data.success}</p>}{fetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{fetcher.data.error}</p>}{typeof consentFetcher.data?.success === "string" && <p role="status">{consentFetcher.data.success}</p>}{consentFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{consentFetcher.data.error}</p>}
     <form method="get" style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}><input name="q" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search name, email, phone, order ID" style={{...style,flex:1,minWidth:220}}/><label style={{display:"flex",gap:6,alignItems:"center"}}><input type="checkbox" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label><input type="hidden" name="ordered" value={String(orderedOnly)}/><button style={style}>Search</button></form>
     <fetcher.Form method="post" onSubmit={e=>{if(!window.confirm("Save a campaign for the selected audience? Only recipients with verified WhatsApp opt-in are eligible.")){e.preventDefault();return;}}}>
       <input type="hidden" name="intent" value="create-campaign"/><input type="hidden" name="selectAllMatching" value={String(selectAllMatching)}/><input type="hidden" name="audienceSearch" value={query}/><input type="hidden" name="orderedOnly" value={String(orderedOnly)}/>{selected.map(id=><input key={id} type="hidden" name="customerId" value={id}/>)}
