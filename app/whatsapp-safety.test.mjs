@@ -28,6 +28,7 @@ process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN = verificationToken;
 process.env.WHATSAPP_TEST_RECIPIENT_PHONE = recipient;
 process.env.WHATSAPP_TEST_SENDING_ENABLED = "false";
 process.env.WHATSAPP_INBOX_SENDING_ENABLED = "false";
+process.env.WHATSAPP_CAMPAIGN_SENDING_ENABLED = "false";
 process.env.WHATSAPP_LIVE_SENDING_ENABLED = "false";
 
 const [{ loader, action }, { default: prisma }, whatsappServer] =
@@ -39,6 +40,7 @@ const [{ loader, action }, { default: prisma }, whatsappServer] =
 const {
   getConfiguredWhatsAppShop,
   isWhatsAppInboxSendingEnabled,
+  isWhatsAppCampaignSendingEnabled,
   isWhatsAppWebhookConfigurationComplete,
 } = whatsappServer;
 
@@ -97,12 +99,18 @@ const check = (name, fn) =>
     .then(() => checked.push(name));
 
 try {
-  await check("general Inbox sending remains explicitly opt-in", () => {
+  await check("Inbox and campaign sending switches are independent opt-ins", () => {
     assert.equal(isWhatsAppInboxSendingEnabled(), false);
+    assert.equal(isWhatsAppCampaignSendingEnabled(), false);
     process.env.WHATSAPP_INBOX_SENDING_ENABLED = "true";
     assert.equal(isWhatsAppInboxSendingEnabled(), true);
+    assert.equal(isWhatsAppCampaignSendingEnabled(), false);
     process.env.WHATSAPP_INBOX_SENDING_ENABLED = "false";
+    process.env.WHATSAPP_CAMPAIGN_SENDING_ENABLED = "true";
     assert.equal(isWhatsAppInboxSendingEnabled(), false);
+    assert.equal(isWhatsAppCampaignSendingEnabled(), true);
+    process.env.WHATSAPP_CAMPAIGN_SENDING_ENABLED = "false";
+    assert.equal(isWhatsAppCampaignSendingEnabled(), false);
   });
 
   const templateComponents = JSON.stringify([
