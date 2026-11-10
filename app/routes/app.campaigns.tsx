@@ -109,7 +109,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       } while (orderAfter);
       return json({success:true, message:`Sync complete: ${customerCount} customer records and ${orderCount} order records processed.`});
     } catch {
-      return json({error:"Sync stopped before completion. Retry the sync; existing local data has been preserved."}, 500);
+      return json({error:"Sync stopped before completion. Some records may already have been updated; retrying is safe because customer and order records are upserted."}, 500);
     }
   }
   if (intent === "consent") {
@@ -154,7 +154,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     let afterId: string | undefined;
     const seenPhones = new Set<string>();
     try {
-      while (true) {
+      let hasMoreRecipients = true;
+      while (hasMoreRecipients) {
         const customers = await prisma.shopifyCustomerMirror.findMany({
           where: audienceWhere,
           orderBy: { id: "asc" },
@@ -196,7 +197,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           await prisma.whatsAppCampaign.update({ where: { id: campaign.id }, data: { audienceCount: recipientCount } });
         }
         afterId = customers[customers.length - 1]?.id;
-        if (customers.length < 500 || !afterId) break;
+        hasMoreRecipients = customers.length === 500 && Boolean(afterId);
       }
     } catch {
       await prisma.whatsAppCampaign.update({where:{id:campaign.id},data:{status:"FAILED"}});
