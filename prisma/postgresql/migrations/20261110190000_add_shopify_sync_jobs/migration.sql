@@ -7,6 +7,7 @@ CREATE TABLE "ShopifySyncJob" (
   "orderCursor" TEXT,
   "customersProcessed" INTEGER NOT NULL DEFAULT 0,
   "ordersProcessed" INTEGER NOT NULL DEFAULT 0,
+  "ordersSkipped" INTEGER NOT NULL DEFAULT 0,
   "customerPages" INTEGER NOT NULL DEFAULT 0,
   "orderPages" INTEGER NOT NULL DEFAULT 0,
   "lastError" TEXT,
