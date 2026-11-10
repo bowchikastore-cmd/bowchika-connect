@@ -213,3 +213,25 @@ model WhatsAppWebhookVerification {
   phoneNumberId String
   verifiedAt    DateTime @default(now())
 }
+
+model ShopifySyncJob {
+  id                 String    @id @default(cuid())
+  shop               String
+  status             String    @default("RUNNING")
+  phase              String    @default("CUSTOMERS")
+  customerCursor     String?
+  orderCursor        String?
+  customersProcessed Int       @default(0)
+  ordersProcessed    Int       @default(0)
+  customerPages      Int       @default(0)
+  orderPages         Int       @default(0)
+  lastError          String?
+  leaseToken         String?
+  leaseExpiresAt     DateTime?
+  startedAt          DateTime  @default(now())
+  completedAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([shop, status, updatedAt])
+}
