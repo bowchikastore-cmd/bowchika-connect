@@ -283,21 +283,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if (!transition) continue;
         const eventAt = parseEventDate(statusEvent.timestamp);
         await prisma.$transaction(async (transaction) => {
-          await transaction.whatsAppMessageStatusEvent.upsert({
-            where: {
-              shop_whatsappMessageId_status: {
-                shop,
-                whatsappMessageId,
-                status: transition.status,
-              },
-            },
-            create: {
-              shop,
-              whatsappMessageId,
-              status: transition.status,
-              eventAt,
-            },
-            update: {},
+          await transaction.whatsAppMessageStatusEvent.createMany({
+            data: [{ shop, whatsappMessageId, status: transition.status, eventAt }],
+            skipDuplicates: true,
           });
           await transaction.whatsAppMessage.updateMany({
             where: {
