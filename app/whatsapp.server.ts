@@ -252,7 +252,7 @@ export const sendAndPersistWhatsAppMessage = async (
       where: { id: pendingMessage.messageId, shop: input.shop },
       data: { status: "FAILED" },
     });
-    return { pendingMessage, error };
+    return { pendingMessage, whatsappMessageId: null, error };
   }
   await database.$transaction((transaction) =>
     recordWhatsAppMessageAccepted(transaction, {
@@ -262,7 +262,7 @@ export const sendAndPersistWhatsAppMessage = async (
       whatsappMessageId,
     }),
   );
-  return { pendingMessage, error: null };
+  return { pendingMessage, whatsappMessageId, error: null };
 };
 
 export const whatsAppApiErrorMessage = (error: unknown) => {
