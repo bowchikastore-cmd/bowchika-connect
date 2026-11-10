@@ -282,14 +282,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const transition = getWhatsAppStatusTransition(statusEvent.status);
         if (!transition) continue;
         const eventAt = parseEventDate(statusEvent.timestamp);
-        await prisma.$transaction(async (transaction) => {
-          try {
-            await transaction.whatsAppMessageStatusEvent.create({
-              data: { shop, whatsappMessageId, status: transition.status, eventAt },
-            });
-          } catch (error) {
-            if (!isUniqueConstraintError(error)) throw error;
-          }
+        const applyStatusTransition = async (transaction: Prisma.TransactionClient) => {
           await transaction.whatsAppMessage.updateMany({
             where: {
               shop,
@@ -308,7 +301,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             where: { shop, whatsappMessageId, status: { in: [...transition.allowed] } },
             data: campaignStatusData,
           });
-        });
+        };
+        try {
+          await prisma.$transaction(async (transaction) => {
+            await transaction.whatsAppMessageStatusEvent.create({
+              data: { shop, whatsappMessageId, status: transition.status, eventAt },
+            });
+            await applyStatusTransition(transaction);
+          });
+        } catch (error) {
+          if (!isUniqueConstraintError(error)) throw error;
+          // Duplicate webhook event: the failed transaction is rolled back.
+          // Apply the idempotent status transition in a fresh transaction.
+          await prisma.$transaction((transaction) => applyStatusTransition(transaction));
+        }
       }
     }
   }
