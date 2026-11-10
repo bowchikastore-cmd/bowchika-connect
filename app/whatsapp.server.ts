@@ -73,6 +73,9 @@ export const isWhatsAppTestSendingEnabled = () =>
 export const isWhatsAppInboxSendingEnabled = () =>
   requiredEnvironment("WHATSAPP_INBOX_SENDING_ENABLED") === "true";
 
+export const isWhatsAppCampaignSendingEnabled = () =>
+  requiredEnvironment("WHATSAPP_CAMPAIGN_SENDING_ENABLED") === "true";
+
 export const createPendingWhatsAppConversationMessage = async (
   database: PrismaClient,
   input: {
