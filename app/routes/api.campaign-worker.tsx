@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
-import { getWhatsAppConfig, sendAndPersistWhatsAppMessage, getConfiguredWhatsAppShop, isWhatsAppInboxSendingEnabled, safeStringEqual } from "../whatsapp.server";
+import { getWhatsAppConfig, sendAndPersistWhatsAppMessage, getConfiguredWhatsAppShop, isWhatsAppCampaignSendingEnabled, safeStringEqual } from "../whatsapp.server";
 import { buildWhatsAppTemplatePayload, normalizeE164Phone, parseWhatsAppTemplateInput } from "../whatsapp-shared";
 
 const json=(body:object,status=200)=>Response.json(body,{status});
@@ -31,11 +31,32 @@ const resolveValue=(path:string,snapshot:JsonRecord,campaign:JsonRecord):unknown
 export const action=async({request}:ActionFunctionArgs)=>{
   if(request.method!=="POST") return new Response("Method not allowed",{status:405});
   if(!isAuthorized(request)) return new Response("Not found",{status:404});
-  if(!isWhatsAppInboxSendingEnabled()) return json({error:"WhatsApp sending is disabled by the existing safety switch."},503);
+  if(!isWhatsAppCampaignSendingEnabled()) return json({error:"Campaign sending is disabled by its dedicated safety switch."},503);
   const configuredShop=getConfiguredWhatsAppShop();
   if(!configuredShop) return json({error:"WhatsApp shop configuration missing."},503);
   let config;
   try { config=getWhatsAppConfig(); } catch { return json({error:"WhatsApp API configuration missing."},503); }
+  // A timed-out worker may have reached Meta before persisting its recipient result.
+  // Never automatically resend an ambiguous PROCESSING recipient; send it to manual reconciliation.
+  const staleBefore = new Date(Date.now() - 15 * 60 * 1000);
+  const staleProcessing = await prisma.whatsAppCampaignRecipient.findMany({
+    where: { shop: configuredShop, status: "PROCESSING", updatedAt: { lt: staleBefore } },
+    select: { id: true },
+  });
+  if (staleProcessing.length) {
+    await prisma.whatsAppCampaignRecipient.updateMany({
+      where: {
+        id: { in: staleProcessing.map((recipient) => recipient.id) },
+        shop: configuredShop,
+        status: "PROCESSING",
+        updatedAt: { lt: staleBefore },
+      },
+      data: {
+        status: "NEEDS_REVIEW",
+        error: "Worker stopped during processing; reconcile the provider message before any manual retry.",
+      },
+    });
+  }
   const now=new Date();
   const campaigns=await prisma.whatsAppCampaign.findMany({
     where:{shop:configuredShop,status:{in:["QUEUED","SCHEDULED","SENDING"]},OR:[{scheduledAt:null},{scheduledAt:{lte:now}}]},
@@ -115,8 +136,22 @@ export const action=async({request}:ActionFunctionArgs)=>{
       processed++;
     }
     const counts=await prisma.whatsAppCampaignRecipient.groupBy({by:["status"],where:{campaignId:campaign.id},_count:{_all:true}});
-    const terminal=counts.every(c=>["SENT","DELIVERED","READ","FAILED","SKIPPED"].includes(c.status));
-    if(terminal) await prisma.whatsAppCampaign.updateMany({where:{id:campaign.id,shop:campaign.shop},data:{status:counts.some(c=>c.status==="FAILED")?"COMPLETED_WITH_ERRORS":"COMPLETED"}});
+    const hasUnprocessed = counts.some((count) => ["QUEUED", "PROCESSING"].includes(count.status));
+    const needsReview = counts.some((count) => count.status === "NEEDS_REVIEW");
+    const terminal = counts.length > 0 && counts.every((count) =>
+      ["SENT", "DELIVERED", "READ", "FAILED", "SKIPPED"].includes(count.status)
+    );
+    if (needsReview && !hasUnprocessed) {
+      await prisma.whatsAppCampaign.updateMany({
+        where: { id: campaign.id, shop: campaign.shop, status: { in: ["QUEUED", "SENDING"] } },
+        data: { status: "NEEDS_REVIEW" },
+      });
+    } else if (terminal) {
+      await prisma.whatsAppCampaign.updateMany({
+        where: { id: campaign.id, shop: campaign.shop },
+        data: { status: counts.some((count) => count.status === "FAILED") ? "COMPLETED_WITH_ERRORS" : "COMPLETED" },
+      });
+    }
   }
   return json({ok:true,processed,campaigns:campaigns.length});
 };
