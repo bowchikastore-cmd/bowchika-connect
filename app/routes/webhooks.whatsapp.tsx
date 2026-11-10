@@ -283,10 +283,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if (!transition) continue;
         const eventAt = parseEventDate(statusEvent.timestamp);
         await prisma.$transaction(async (transaction) => {
-          await transaction.whatsAppMessageStatusEvent.createMany({
-            data: [{ shop, whatsappMessageId, status: transition.status, eventAt }],
-            skipDuplicates: true,
-          });
+          try {
+            await transaction.whatsAppMessageStatusEvent.create({
+              data: { shop, whatsappMessageId, status: transition.status, eventAt },
+            });
+          } catch (error) {
+            if (!isUniqueConstraintError(error)) throw error;
+          }
           await transaction.whatsAppMessage.updateMany({
             where: {
               shop,
