@@ -68,7 +68,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const orderedOnly = url.searchParams.get("ordered") !== "false";
   const cursor = url.searchParams.get("cursor") ?? undefined;
   const customerWhere = { shop: session.shop, ...(orderedOnly ? { numberOfOrders: { gt: 0 } } : {}), ...(search ? { OR: [{firstName:{contains:search}},{lastName:{contains:search}},{email:{contains:search}},{phone:{contains:search}},{orders:{some:{orderName:{contains:search}}}}] } : {}) };
-  const [templates, customers, customerCount, orderCount, campaigns] = await Promise.all([
+  const [templates, customers, customerCount, orderCount, campaigns, syncJob] = await Promise.all([
     prisma.approvedWhatsAppTemplate.findMany({ where: { shop: session.shop }, orderBy: [{name:"asc"},{language:"asc"}] }),
     prisma.shopifyCustomerMirror.findMany({
       where: customerWhere,
@@ -177,11 +177,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             };
           };
         };
-        if (result.errors?.length || !result.data?.customers?.pageInfo) {
+        const connection = result.data?.customers;
+        const pageInfo = connection?.pageInfo;
+        if (result.errors?.length || !connection || !pageInfo) {
           throw new Error("Shopify customer page could not be read. Check customer access and retry.");
         }
 
-        const connection = result.data.customers;
         const customers = connection.nodes ?? [];
         const now = new Date();
         const writes = customers.map((customer) => {
@@ -206,8 +207,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         });
         if (writes.length) await prisma.$transaction(writes);
 
-        const hasNextPage = connection.pageInfo.hasNextPage;
-        const nextCursor = hasNextPage ? connection.pageInfo.endCursor : null;
+        const hasNextPage = pageInfo.hasNextPage;
+        const nextCursor = hasNextPage ? pageInfo.endCursor : null;
         if (hasNextPage && (!nextCursor || nextCursor === job.customerCursor)) {
           throw new Error("Shopify customer pagination returned a missing or repeated cursor. Resume after checking the Shopify response.");
         }
@@ -252,11 +253,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             };
           };
         };
-        if (result.errors?.length || !result.data?.orders?.pageInfo) {
+        const connection = result.data?.orders;
+        const pageInfo = connection?.pageInfo;
+        if (result.errors?.length || !connection || !pageInfo) {
           throw new Error("Shopify order page could not be read. Check order access and retry.");
         }
 
-        const connection = result.data.orders;
         const orders = connection.nodes ?? [];
         const customerIds = [...new Set(orders.flatMap((order) => order.customer?.id ? [order.customer.id] : []))];
         const customers = customerIds.length
@@ -296,8 +298,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         });
         if (writes.length) await prisma.$transaction(writes);
 
-        const hasNextPage = connection.pageInfo.hasNextPage;
-        const nextCursor = hasNextPage ? connection.pageInfo.endCursor : null;
+        const hasNextPage = pageInfo.hasNextPage;
+        const nextCursor = hasNextPage ? pageInfo.endCursor : null;
         if (hasNextPage && (!nextCursor || nextCursor === job.orderCursor)) {
           throw new Error("Shopify order pagination returned a missing or repeated cursor. Resume after checking the Shopify response.");
         }
