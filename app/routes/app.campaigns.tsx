@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { randomUUID } from "node:crypto";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
@@ -135,7 +134,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return json({ error: "Shopify sync could not be started." }, 500);
     }
 
-    const leaseToken = randomUUID();
+    const leaseToken = globalThis.crypto.randomUUID();
     const leaseStartedAt = new Date();
     const lease = await prisma.shopifySyncJob.updateMany({
       where: {
