@@ -223,6 +223,7 @@ model ShopifySyncJob {
   orderCursor        String?
   customersProcessed Int       @default(0)
   ordersProcessed    Int       @default(0)
+  ordersSkipped      Int       @default(0)
   customerPages      Int       @default(0)
   orderPages         Int       @default(0)
   lastError          String?
