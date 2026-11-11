@@ -20,3 +20,5 @@ CREATE UNIQUE INDEX "WhatsAppContactSuppression_shop_phoneNumber_key"
   ON "WhatsAppContactSuppression"("shop", "phoneNumber");
 CREATE INDEX "WhatsAppContactSuppression_shop_lastOptOutAt_idx"
   ON "WhatsAppContactSuppression"("shop", "lastOptOutAt");
+
+ALTER TABLE "WhatsAppCampaign" ADD COLUMN "audienceCriteriaJson" TEXT NOT NULL DEFAULT '{}';
