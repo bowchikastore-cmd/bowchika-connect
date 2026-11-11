@@ -148,10 +148,23 @@ const processIncomingMessage = async (
         },
       });
 
-      // A clear inbound opt-out immediately revokes local campaign eligibility.
-      // Never infer opt-in from inbound keywords; explicit consent must be recorded separately.
-      const inboundText = getMessageText(message, rawType).trim();
-      if (/^(stop|unsubscribe|opt\s*out|cancel|quit)$/i.test(inboundText)) {
+      // Suppress the phone number even when it cannot currently be linked to a Shopify customer.
+      // A future Shopify re-subscription can clear this record only when its consent timestamp is newer.
+      const inboundText = getMessageText(message, rawType).trim().replace(/[.!]+$/, "").replace(/\s+/g, " ");
+      if (/^(stop|unsubscribe|opt\s*out|cancel|quit|end)$/i.test(inboundText)) {
+        await transaction.whatsAppContactSuppression.upsert({
+          where: { shop_phoneNumber: { shop, phoneNumber } },
+          create: {
+            shop,
+            phoneNumber,
+            reason: "OPT_OUT_KEYWORD",
+            lastOptOutAt: receivedAt,
+          },
+          update: {
+            reason: "OPT_OUT_KEYWORD",
+            lastOptOutAt: receivedAt,
+          },
+        });
         const mirroredCustomers = await transaction.shopifyCustomerMirror.findMany({
           where: { shop },
           select: { id: true, phone: true },
@@ -162,20 +175,16 @@ const processIncomingMessage = async (
         if (matchingCustomerIds.length) {
           await transaction.shopifyCustomerMirror.updateMany({
             where: { shop, id: { in: matchingCustomerIds } },
-            data: { whatsappOptIn: false },
-          });
-          await transaction.whatsAppCampaignRecipient.updateMany({
-            where: {
-              shop,
-              customerId: { in: matchingCustomerIds },
-              status: "QUEUED",
-            },
-            data: {
-              status: "SKIPPED",
-              error: "Customer opted out via WhatsApp.",
-            },
+            data: { whatsappOptIn: false, whatsappOptOutAt: receivedAt },
           });
         }
+        await transaction.whatsAppCampaignRecipient.updateMany({
+          where: { shop, phoneNumber, status: "QUEUED" },
+          data: {
+            status: "SKIPPED",
+            error: "Customer opted out via WhatsApp.",
+          },
+        });
       }
     });
   } catch (error) {
