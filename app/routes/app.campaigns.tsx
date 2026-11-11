@@ -69,7 +69,13 @@ type ShopifyOrderNode = {
     lastName?: string | null;
     defaultEmailAddress?: { emailAddress: string | null } | null;
     defaultPhoneNumber?: { phoneNumber: string | null } | null;
+    numberOfOrders?: number;
+    amountSpent?: { amount: string; currencyCode: string } | null;
+    tags?: string[];
+    updatedAt?: string | null;
   } | null;
+  email: string | null;
+  phone: string | null;
   billingAddress?: { phone: string | null; name: string | null } | null;
   totalPriceSet?: { shopMoney?: { amount: string; currencyCode: string } | null } | null;
   lineItems?: { nodes?: Array<{ name: string; quantity: number; sku: string | null; variantTitle: string | null }> | null } | null;
@@ -85,7 +91,7 @@ const orderQuery = `#graphql
 query BowchikaOrderMirror($after: String) {
   orders(first: 100, after: $after, sortKey: CREATED_AT, reverse: true) {
     pageInfo { hasNextPage endCursor }
-    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber } } billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
+    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName updatedAt tags numberOfOrders amountSpent { amount currencyCode } defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber } } email phone billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
   }
 }`;
 
@@ -491,14 +497,30 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
 
         const orders = connection.nodes ?? [];
-        const customerIds = [...new Set(orders.flatMap((order) => order.customer?.id ? [order.customer.id] : []))];
-        const customers = customerIds.length
-          ? await prisma.shopifyCustomerMirror.findMany({
-              where: { shop, id: { in: customerIds } },
-              select: { id: true },
-            })
-          : [];
-        const knownCustomerIds = new Set(customers.map((customer) => customer.id));
+        const customerNodes = new Map(
+          orders.flatMap((order) => order.customer ? [[order.customer.id, order.customer] as const] : []),
+        );
+        const customerWrites = [...customerNodes.values()].map((customer) => {
+          const customerFields = {
+            firstName: customer.firstName ?? null,
+            lastName: customer.lastName ?? null,
+            email: customer.defaultEmailAddress?.emailAddress ?? null,
+            phone: customer.defaultPhoneNumber?.phoneNumber ?? null,
+            numberOfOrders: Number(customer.numberOfOrders ?? 0),
+            amountSpent: Number(customer.amountSpent?.amount ?? 0),
+            currencyCode: customer.amountSpent?.currencyCode ?? "INR",
+            tagsJson: JSON.stringify(customer.tags ?? []),
+            updatedAtShopify: customer.updatedAt ? new Date(customer.updatedAt) : null,
+            syncedAt: new Date(),
+          };
+          return prisma.shopifyCustomerMirror.upsert({
+            where: { id: customer.id },
+            create: { id: customer.id, shop, ...customerFields },
+            update: customerFields,
+          });
+        });
+        if (customerWrites.length) await prisma.$transaction(customerWrites);
+        const knownCustomerIds = new Set(customerNodes.keys());
         let unlinked = 0;
         const now = new Date();
         const writes = orders.map((order) => {
@@ -513,8 +535,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           const fields = {
             shop,
             customerId,
-            customerEmail: order.customer?.defaultEmailAddress?.emailAddress ?? null,
-            customerPhone: order.customer?.defaultPhoneNumber?.phoneNumber ?? order.billingAddress?.phone ?? null,
+            customerEmail: order.customer?.defaultEmailAddress?.emailAddress ?? order.email ?? null,
+            customerPhone: order.customer?.defaultPhoneNumber?.phoneNumber ?? order.phone ?? order.billingAddress?.phone ?? null,
             customerName,
             orderName: order.name,
             orderNumber: order.number ?? null,
