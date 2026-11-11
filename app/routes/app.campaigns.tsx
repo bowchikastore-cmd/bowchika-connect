@@ -153,9 +153,10 @@ const syncShopifyCustomerMirrors = async (
       normalizeE164Phone(existingCustomer.phone ?? "") === normalizedPhone,
     );
     const suppressionAt = normalizedPhone ? suppressionByPhone.get(normalizedPhone) ?? null : null;
-    const localOptOutAt = samePhone
-      ? existingCustomer?.whatsappOptOutAt ?? suppressionAt
-      : suppressionAt;
+    const customerOptOutAt = samePhone ? existingCustomer?.whatsappOptOutAt ?? null : null;
+    const localOptOutAt = customerOptOutAt && suppressionAt
+      ? (customerOptOutAt > suppressionAt ? customerOptOutAt : suppressionAt)
+      : customerOptOutAt ?? suppressionAt;
     const nativeConsent = customer.defaultPhoneNumber?.whatsAppMarketingConsent;
     const consentState = nativeConsent?.state ?? "NEVER_SUBSCRIBED";
     const consentUpdatedAt = nativeConsent?.updatedAt ? new Date(nativeConsent.updatedAt) : null;
@@ -175,7 +176,7 @@ const syncShopifyCustomerMirrors = async (
       amountSpent: Number(customer.amountSpent?.amount ?? 0),
       currencyCode: customer.amountSpent?.currencyCode ?? "INR",
       tagsJson: JSON.stringify(customer.tags ?? []),
-      createdAtShopify: customer.createdAt ? new Date(customer.createdAt) : null,
+      createdAtShopify: customer.createdAt ? new Date(customer.createdAt) : undefined,
       updatedAtShopify: customer.updatedAt ? new Date(customer.updatedAt) : null,
       whatsappConsentState: consentState,
       whatsappConsentUpdatedAt: consentUpdatedAt,
@@ -197,7 +198,7 @@ const syncShopifyCustomerMirrors = async (
       where: { shop, phoneNumber: { in: [...reconsentedPhones] } },
     }));
   }
-  await prisma.$transaction(operations);
+  await prisma.$transaction(operations as never);
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
