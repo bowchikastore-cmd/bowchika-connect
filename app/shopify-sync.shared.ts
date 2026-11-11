@@ -17,5 +17,5 @@ export const buildUpdatedAtSearchQuery = (since: Date) => {
   if (!Number.isFinite(since.getTime())) {
     throw new Error("A valid updated-at checkpoint is required.");
   }
-  return `updated_at:>=${since.toISOString()}`;
+  return `updated_at:>= '${since.toISOString()}'`;
 };
