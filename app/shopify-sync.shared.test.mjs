@@ -12,7 +12,7 @@ assert.equal(SHOPIFY_SYNC_OVERLAP_MS, 24 * 60 * 60 * 1000);
 assert.equal(since.toISOString(), "2026-11-10T06:00:00.000Z");
 assert.equal(
   buildUpdatedAtSearchQuery(since),
-  "updated_at:>= '2026-11-10T06:00:00.000Z'",
+  "updated_at:>='2026-11-10T06:00:00.000Z'",
 );
 assert.equal(
   getIncrementalSyncSince(completedAt, 0).toISOString(),
