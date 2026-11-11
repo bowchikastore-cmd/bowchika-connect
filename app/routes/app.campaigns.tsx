@@ -738,13 +738,15 @@ export default function CampaignCenter() {
     <h1>Shopify customers → WhatsApp campaigns</h1>
     <p>Synced customer and order records, full-store search, bulk selection, approved template mapping and scheduled campaign drafts.</p>
     <syncFetcher.Form method="post" onSubmit={() => { autoSyncContinuation.current = null; }} style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
-      <input type="hidden" name="intent" value="sync"/>
-      <button style={style} disabled={syncFetcher.state!=="idle"}>
-        {data.syncJob?.status === "RUNNING" ? "Resume customer & order sync" : "Sync all Shopify customers & orders"}
+      <button name="intent" value="sync" style={style} disabled={syncFetcher.state!=="idle"}>
+        {data.syncJob?.status === "RUNNING" ? "Resume current sync" : "Run full sync (all accessible records)"}
+      </button>
+      <button name="intent" value="sync-incremental" style={{...style,background:"#e8f5ee",borderColor:"#a6d7b8"}} disabled={syncFetcher.state!=="idle" || data.syncJob?.status === "RUNNING" || !data.syncJob?.completedAt}>
+        Sync new & updated only
       </button>
       <span>{data.customerCount.toLocaleString("en-IN")} local customers · {data.orderCount.toLocaleString("en-IN")} local orders</span>
     </syncFetcher.Form>
-    <p style={{fontSize:13,color:"#667085",marginTop:0}}>Sync runs in resumable 100-record Shopify pages. Keep this page open while it processes; after interruption, press Resume. Shopify exposes only the default recent 60-day order window unless the app receives read_all_orders approval.</p>
+    <p style={{fontSize:13,color:"#667085",marginTop:0}}>Use incremental sync for normal daily updates. It checks Shopify customers and orders changed since the previous completed sync, with a 24-hour overlap to catch late updates safely; records are upserted by Shopify ID. A full sync is only for initial setup or deliberate reconciliation. Shopify exposes only the default recent 60-day order window unless the app receives read_all_orders approval.</p>
     <div style={{padding:14,border:"1px solid #d0d5dd",borderRadius:8,margin:"16px 0",background:"white"}}>
       <h2 style={{marginTop:0}}>Import historical Shopify orders</h2>
       <p style={{fontSize:13,color:"#667085"}}>Upload the Shopify Orders CSV export. Bowchika Connect groups line items by Shopify order ID, matches customers by unique email/phone, and keeps existing API orders instead of duplicating or overwriting them. Unmatched orders are still stored, but remain unlinked until they can be matched.</p>
