@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
-import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { normalizeE164Phone, getWhatsAppTemplateRequirements } from "../whatsapp-shared";
@@ -959,6 +958,33 @@ export default function CampaignCenter() {
   const [collectionQuery,setCollectionQuery] = useState(data.filters.collectionQuery);
   const [variableMapping,setVariableMapping] = useState<Record<string,string>>({});
   const [customMapping,setCustomMapping] = useState<Record<string,string>>({});
+  const template = data.templates.find(t=>t.id===chosenTemplate);
+  const requirements = useMemo(()=>{try{return template?getWhatsAppTemplateRequirements(template.components):null}catch{return null}},[template]);
+  const sampleCustomer = {
+    firstName: "Alex",
+    lastName: "Morgan",
+    name: "Alex Morgan",
+    email: "alex@example.com",
+    phone: "+91 98765 43210",
+    numberOfOrders: "3",
+    amountSpent: "₹4,299",
+    "latestOrder.orderName": "#1538",
+    "latestOrder.totalPrice": "₹949",
+    "latestOrder.productName": "Raze – Blast Artist T-Shirt",
+  };
+  const previewValue = (section: string, key: string) => {
+    const path = variableMapping[section + "." + key] || "name";
+    if (path === "custom") return customMapping[section + "." + key] || "[Custom text]";
+    return sampleCustomer[path as keyof typeof sampleCustomer] ?? "[Sample value]";
+  };
+  const previewText = (text: string, section: string) => text.replace(
+    /\\{\\{\\s*([A-Za-z0-9_]+)\\s*\\}\\}/g,
+    (_match, key: string) => previewValue(section, key),
+  );
+  const previewHeader = requirements?.header?.format === "TEXT"
+    ? previewText(requirements.header.text, "header")
+    : "";
+  const previewBody = requirements ? previewText(requirements.bodyText, "body") : "";
 
   useEffect(() => {
     if (imageFetcher.state === "idle" && imageFetcher.data?.mediaUrl) {
@@ -1034,31 +1060,6 @@ export default function CampaignCenter() {
     }
   };
 
-  const sampleCustomer = {
-    firstName: "Alex",
-    lastName: "Morgan",
-    name: "Alex Morgan",
-    email: "alex@example.com",
-    phone: "+91 98765 43210",
-    numberOfOrders: "3",
-    amountSpent: "₹4,299",
-    "latestOrder.orderName": "#1538",
-    "latestOrder.totalPrice": "₹949",
-    "latestOrder.productName": "Raze – Blast Artist T-Shirt",
-  };
-  const previewValue = (section: string, key: string) => {
-    const path = variableMapping[section + "." + key] || "name";
-    if (path === "custom") return customMapping[section + "." + key] || "[Custom text]";
-    return sampleCustomer[path as keyof typeof sampleCustomer] ?? "[Sample value]";
-  };
-  const previewText = (text: string, section: string) => text.replace(
-    /\\{\\{\\s*([A-Za-z0-9_]+)\\s*\\}\\}/g,
-    (_match, key: string) => previewValue(section, key),
-  );
-  const previewHeader = requirements?.header?.format === "TEXT"
-    ? previewText(requirements.header.text, "header")
-    : "";
-  const previewBody = requirements ? previewText(requirements.bodyText, "body") : "";
   useEffect(() => {
     const result = syncFetcher.data;
     if (syncFetcher.state !== "idle" || !result?.hasMore || !result.syncJobId || !result.continuation) return;
@@ -1070,8 +1071,6 @@ export default function CampaignCenter() {
     );
   }, [syncFetcher.state, syncFetcher.data, syncFetcher.submit]);
 
-  const template = data.templates.find(t=>t.id===chosenTemplate);
-  const requirements = useMemo(()=>{try{return template?getWhatsAppTemplateRequirements(template.components):null}catch{return null}},[template]);
   const fields = [{label:"Customer first name",value:"firstName"},{label:"Customer full name",value:"name"},{label:"Customer email",value:"email"},{label:"Customer phone",value:"phone"},{label:"Latest order number",value:"latestOrder.orderName"},{label:"Latest order total",value:"latestOrder.totalPrice"},{label:"Product name (latest order)",value:"latestOrder.productName"},{label:"Order count",value:"numberOfOrders"},{label:"Total spend",value:"amountSpent"},{label:"Custom text",value:"custom"}];
   const style = {padding:10,border:"1px solid #d0d5dd",borderRadius:8,background:"white",color:"#222"} as const;
   const inputStyle = { ...style, width: "100%", boxSizing: "border-box" as const };
