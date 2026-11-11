@@ -39,6 +39,8 @@ jobs:
         run: npm run typecheck
       - name: Lint
         run: npm run lint
+      - name: Validate campaign worker script
+        run: node --check scripts/run-campaign-worker.mjs
       - name: WhatsApp safety and webhook tests
         run: npx vite-node app/whatsapp-safety.test.mjs
       - name: Shopify sync checkpoint tests
