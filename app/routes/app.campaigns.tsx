@@ -1060,16 +1060,19 @@ export default function CampaignCenter() {
     }
   };
 
+  const syncState = syncFetcher.state;
+  const syncData = syncFetcher.data;
+  const submitSync = syncFetcher.submit;
   useEffect(() => {
-    const result = syncFetcher.data;
-    if (syncFetcher.state !== "idle" || !result?.hasMore || !result.syncJobId || !result.continuation) return;
+    const result = syncData;
+    if (syncState !== "idle" || !result?.hasMore || !result.syncJobId || !result.continuation) return;
     if (autoSyncContinuation.current === result.continuation) return;
     autoSyncContinuation.current = result.continuation;
-    syncFetcher.submit(
+    submitSync(
       { intent: "sync-next", jobId: result.syncJobId },
       { method: "post" },
     );
-  }, [syncFetcher.state, syncFetcher.data, syncFetcher.submit]);
+  }, [syncState, syncData, submitSync]);
 
   const fields = [{label:"Customer first name",value:"firstName"},{label:"Customer full name",value:"name"},{label:"Customer email",value:"email"},{label:"Customer phone",value:"phone"},{label:"Latest order number",value:"latestOrder.orderName"},{label:"Latest order total",value:"latestOrder.totalPrice"},{label:"Product name (latest order)",value:"latestOrder.productName"},{label:"Order count",value:"numberOfOrders"},{label:"Total spend",value:"amountSpent"},{label:"Custom text",value:"custom"}];
   const style = {padding:10,border:"1px solid #d0d5dd",borderRadius:8,background:"white",color:"#222"} as const;
@@ -1134,7 +1137,7 @@ export default function CampaignCenter() {
       <label style={{display:"flex",gap:8,alignItems:"center"}}><input type="checkbox" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label>
       <input type="hidden" name="ordered" value={String(orderedOnly)}/>
       <div style={{display:"flex",gap:8,alignItems:"end"}}><button type="submit" style={{...style,background:"#155eef",color:"white"}}>Apply filters</button><a href="/app/campaigns" style={{...style,textDecoration:"none"}}>Clear filters</a></div>
-      <div style={{gridColumn:"1 / -1",fontSize:12,color:"#667085"}}>Product and collection filters use synced Shopify line-item IDs, titles and collections. Orders available through Shopify's standard access or the historic CSV data are included where their line-item details support the selected filter.</div>
+      <div style={{gridColumn:"1 / -1",fontSize:12,color:"#667085"}}>Product and collection filters use synced Shopify line-item IDs, titles and collections. Orders available through Shopify&apos;s standard access or the historic CSV data are included where their line-item details support the selected filter.</div>
     </form>
     <fetcher.Form method="post" onSubmit={e=>{if(!window.confirm("Save a campaign for the selected audience? Only recipients with verified WhatsApp opt-in are eligible.")){e.preventDefault();return;}}}>
       <input type="hidden" name="intent" value="create-campaign"/><input type="hidden" name="selectAllMatching" value={String(selectAllMatching)}/><input type="hidden" name="audienceSearch" value={query}/><input type="hidden" name="orderedOnly" value={String(orderedOnly)}/>
@@ -1149,7 +1152,7 @@ export default function CampaignCenter() {
       <label>Schedule (blank = queue now)<input type="datetime-local" name="scheduledAt" value={scheduledAt} onChange={e=>setScheduledAt(e.target.value)} style={{...style,width:"100%",marginTop:6}}/></label>
       {requirements?.header?.format==="IMAGE"&&<div style={{display:"grid",gap:8}}>
         <label>Image header<input name="mediaUrl" value={mediaUrl} onChange={e=>setMediaUrl(e.target.value)} placeholder="Paste a public HTTPS image URL" style={{...inputStyle,marginTop:6}}/></label>
-        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}><button type="button" style={style} onClick={pickShopifyImage} disabled={imagePickerBusy || imageFetcher.state!=="idle"}>{imagePickerBusy || imageFetcher.state!=="idle" ? "Opening Shopify Files…" : "Choose from Shopify Files"}</button><small style={{color:"#667085"}}>Uses your store's native Files picker</small></div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}><button type="button" style={style} onClick={pickShopifyImage} disabled={imagePickerBusy || imageFetcher.state!=="idle"}>{imagePickerBusy || imageFetcher.state!=="idle" ? "Opening Shopify Files…" : "Choose from Shopify Files"}</button><small style={{color:"#667085"}}>Uses your store&apos;s native Files picker</small></div>
         {imagePickerError && <p role="alert" style={{color:"#b42318",margin:0}}>{imagePickerError}</p>}
       </div>}
       </div>
