@@ -42,17 +42,35 @@ type CampaignActionData = {
     importedLineItems: number;
   };
 };
-type ShopifyCustomerNode = {
+type ShopifyWhatsAppConsent = {
+  state: string;
+  updatedAt: string | null;
+  collectedFrom: string | null;
+  optInLevel: string | null;
+};
+type ShopifyPhoneNumber = {
+  phoneNumber: string | null;
+  whatsAppMarketingConsent?: ShopifyWhatsAppConsent | null;
+};
+type ShopifyCustomerData = {
   id: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  tags?: string[];
+  numberOfOrders?: number;
+  defaultEmailAddress?: { emailAddress: string | null } | null;
+  defaultPhoneNumber?: ShopifyPhoneNumber | null;
+  amountSpent?: { amount: string; currencyCode: string } | null;
+};
+type ShopifyCustomerNode = ShopifyCustomerData & {
   firstName: string | null;
   lastName: string | null;
   createdAt: string | null;
   updatedAt: string | null;
   tags: string[];
   numberOfOrders: number;
-  defaultEmailAddress?: { emailAddress: string | null } | null;
-  defaultPhoneNumber?: { phoneNumber: string | null } | null;
-  amountSpent?: { amount: string; currencyCode: string } | null;
 };
 type ShopifyOrderNode = {
   id: string;
@@ -63,17 +81,7 @@ type ShopifyOrderNode = {
   updatedAt: string | null;
   displayFinancialStatus: string | null;
   displayFulfillmentStatus: string | null;
-  customer?: {
-    id: string;
-    firstName?: string | null;
-    lastName?: string | null;
-    defaultEmailAddress?: { emailAddress: string | null } | null;
-    defaultPhoneNumber?: { phoneNumber: string | null } | null;
-    numberOfOrders?: number;
-    amountSpent?: { amount: string; currencyCode: string } | null;
-    tags?: string[];
-    updatedAt?: string | null;
-  } | null;
+  customer?: ShopifyCustomerData | null;
   email: string | null;
   phone: string | null;
   billingAddress?: { phone: string | null; name: string | null } | null;
@@ -84,14 +92,14 @@ const customerQuery = `#graphql
 query BowchikaCustomerMirror($after: String) {
   customers(first: 100, after: $after, sortKey: CREATED_AT) {
     pageInfo { hasNextPage endCursor }
-    nodes { id firstName lastName createdAt updatedAt tags numberOfOrders defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber } amountSpent { amount currencyCode } }
+    nodes { id firstName lastName createdAt updatedAt tags numberOfOrders defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber whatsAppMarketingConsent { state updatedAt collectedFrom optInLevel } } amountSpent { amount currencyCode } }
   }
 }`;
 const orderQuery = `#graphql
 query BowchikaOrderMirror($after: String) {
   orders(first: 100, after: $after, sortKey: CREATED_AT, reverse: true) {
     pageInfo { hasNextPage endCursor }
-    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName updatedAt tags numberOfOrders amountSpent { amount currencyCode } defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber } } email phone billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
+    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName updatedAt tags numberOfOrders amountSpent { amount currencyCode } defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber whatsAppMarketingConsent { state updatedAt collectedFrom optInLevel } } } email phone billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
   }
 }`;
 
@@ -99,7 +107,7 @@ const incrementalCustomerQuery = `#graphql
 query BowchikaIncrementalCustomers($after: String, $query: String) {
   customers(first: 100, after: $after, query: $query, sortKey: UPDATED_AT) {
     pageInfo { hasNextPage endCursor }
-    nodes { id firstName lastName createdAt updatedAt tags numberOfOrders defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber } amountSpent { amount currencyCode } }
+    nodes { id firstName lastName createdAt updatedAt tags numberOfOrders defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber whatsAppMarketingConsent { state updatedAt collectedFrom optInLevel } } amountSpent { amount currencyCode } }
   }
 }`;
 
@@ -107,9 +115,90 @@ const incrementalOrderQuery = `#graphql
 query BowchikaIncrementalOrders($after: String, $query: String) {
   orders(first: 100, after: $after, query: $query, sortKey: UPDATED_AT) {
     pageInfo { hasNextPage endCursor }
-    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName updatedAt tags numberOfOrders amountSpent { amount currencyCode } defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber } } email phone billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
+    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName updatedAt tags numberOfOrders amountSpent { amount currencyCode } defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber whatsAppMarketingConsent { state updatedAt collectedFrom optInLevel } } } email phone billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
   }
 }`;
+
+const syncShopifyCustomerMirrors = async (
+  shop: string,
+  customers: ShopifyCustomerData[],
+) => {
+  if (!customers.length) return;
+  const ids = customers.map((customer) => customer.id);
+  const phones = [...new Set(customers
+    .map((customer) => normalizeE164Phone(customer.defaultPhoneNumber?.phoneNumber ?? ""))
+    .filter((phone): phone is string => Boolean(phone)))];
+  const [existing, suppressions] = await Promise.all([
+    prisma.shopifyCustomerMirror.findMany({
+      where: { shop, id: { in: ids } },
+      select: { id: true, phone: true, whatsappOptOutAt: true },
+    }),
+    phones.length
+      ? prisma.whatsAppContactSuppression.findMany({
+          where: { shop, phoneNumber: { in: phones } },
+          select: { phoneNumber: true, lastOptOutAt: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  const existingById = new Map(existing.map((customer) => [customer.id, customer]));
+  const suppressionByPhone = new Map(suppressions.map((item) => [item.phoneNumber, item.lastOptOutAt]));
+  const reconsentedPhones = new Set<string>();
+  const now = new Date();
+  const writes = customers.map((customer) => {
+    const rawPhone = customer.defaultPhoneNumber?.phoneNumber ?? null;
+    const normalizedPhone = normalizeE164Phone(rawPhone ?? "");
+    const existingCustomer = existingById.get(customer.id);
+    const samePhone = Boolean(
+      existingCustomer &&
+      normalizeE164Phone(existingCustomer.phone ?? "") === normalizedPhone,
+    );
+    const suppressionAt = normalizedPhone ? suppressionByPhone.get(normalizedPhone) ?? null : null;
+    const localOptOutAt = samePhone
+      ? existingCustomer?.whatsappOptOutAt ?? suppressionAt
+      : suppressionAt;
+    const nativeConsent = customer.defaultPhoneNumber?.whatsAppMarketingConsent;
+    const consentState = nativeConsent?.state ?? "NEVER_SUBSCRIBED";
+    const consentUpdatedAt = nativeConsent?.updatedAt ? new Date(nativeConsent.updatedAt) : null;
+    const reconsented = Boolean(
+      consentState === "SUBSCRIBED" &&
+      consentUpdatedAt &&
+      localOptOutAt &&
+      consentUpdatedAt.getTime() > localOptOutAt.getTime(),
+    );
+    if (reconsented && normalizedPhone) reconsentedPhones.add(normalizedPhone);
+    const fields = {
+      firstName: customer.firstName ?? null,
+      lastName: customer.lastName ?? null,
+      email: customer.defaultEmailAddress?.emailAddress ?? null,
+      phone: rawPhone,
+      numberOfOrders: Number(customer.numberOfOrders ?? 0),
+      amountSpent: Number(customer.amountSpent?.amount ?? 0),
+      currencyCode: customer.amountSpent?.currencyCode ?? "INR",
+      tagsJson: JSON.stringify(customer.tags ?? []),
+      createdAtShopify: customer.createdAt ? new Date(customer.createdAt) : null,
+      updatedAtShopify: customer.updatedAt ? new Date(customer.updatedAt) : null,
+      whatsappConsentState: consentState,
+      whatsappConsentUpdatedAt: consentUpdatedAt,
+      whatsappConsentCollectedFrom: nativeConsent?.collectedFrom ?? null,
+      whatsappConsentOptInLevel: nativeConsent?.optInLevel ?? null,
+      whatsappOptOutAt: reconsented ? null : localOptOutAt,
+      whatsappOptIn: consentState === "SUBSCRIBED" && (!localOptOutAt || reconsented),
+      syncedAt: now,
+    };
+    return prisma.shopifyCustomerMirror.upsert({
+      where: { id: customer.id },
+      create: { id: customer.id, shop, ...fields },
+      update: fields,
+    });
+  });
+  const operations = [...writes];
+  if (reconsentedPhones.size) {
+    operations.push(prisma.whatsAppContactSuppression.deleteMany({
+      where: { shop, phoneNumber: { in: [...reconsentedPhones] } },
+    }));
+  }
+  await prisma.$transaction(operations);
+};
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -408,28 +497,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
 
         const customers = connection.nodes ?? [];
-        const now = new Date();
-        const writes = customers.map((customer) => {
-          const fields = {
-            firstName: customer.firstName,
-            lastName: customer.lastName,
-            email: customer.defaultEmailAddress?.emailAddress ?? null,
-            phone: customer.defaultPhoneNumber?.phoneNumber ?? null,
-            numberOfOrders: Number(customer.numberOfOrders ?? 0),
-            amountSpent: Number(customer.amountSpent?.amount ?? 0),
-            currencyCode: customer.amountSpent?.currencyCode ?? "INR",
-            tagsJson: JSON.stringify(customer.tags ?? []),
-            createdAtShopify: customer.createdAt ? new Date(customer.createdAt) : null,
-            updatedAtShopify: customer.updatedAt ? new Date(customer.updatedAt) : null,
-            syncedAt: now,
-          };
-          return prisma.shopifyCustomerMirror.upsert({
-            where: { id: customer.id },
-            create: { id: customer.id, shop, ...fields },
-            update: fields,
-          });
-        });
-        if (writes.length) await prisma.$transaction(writes);
+        await syncShopifyCustomerMirrors(shop, customers);
 
         const hasNextPage = pageInfo.hasNextPage;
         const nextCursor = hasNextPage ? pageInfo.endCursor : null;
@@ -500,26 +568,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const customerNodes = new Map(
           orders.flatMap((order) => order.customer ? [[order.customer.id, order.customer] as const] : []),
         );
-        const customerWrites = [...customerNodes.values()].map((customer) => {
-          const customerFields = {
-            firstName: customer.firstName ?? null,
-            lastName: customer.lastName ?? null,
-            email: customer.defaultEmailAddress?.emailAddress ?? null,
-            phone: customer.defaultPhoneNumber?.phoneNumber ?? null,
-            numberOfOrders: Number(customer.numberOfOrders ?? 0),
-            amountSpent: Number(customer.amountSpent?.amount ?? 0),
-            currencyCode: customer.amountSpent?.currencyCode ?? "INR",
-            tagsJson: JSON.stringify(customer.tags ?? []),
-            updatedAtShopify: customer.updatedAt ? new Date(customer.updatedAt) : null,
-            syncedAt: new Date(),
-          };
-          return prisma.shopifyCustomerMirror.upsert({
-            where: { id: customer.id },
-            create: { id: customer.id, shop, ...customerFields },
-            update: customerFields,
-          });
-        });
-        if (customerWrites.length) await prisma.$transaction(customerWrites);
+        await syncShopifyCustomerMirrors(shop, [...customerNodes.values()]);
         const knownCustomerIds = new Set(customerNodes.keys());
         let unlinked = 0;
         const now = new Date();
@@ -624,12 +673,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }, 500);
     }
   }
-  if (intent === "consent") {
-    const customerId = field(data,"customerId");
-    const optedIn = field(data,"optedIn") === "true";
-    const updated = await prisma.shopifyCustomerMirror.updateMany({ where:{id:customerId,shop:session.shop}, data:{whatsappOptIn:optedIn} });
-    return json(updated.count ? {success: optedIn ? "WhatsApp opt-in recorded. Only mark this after verifying the customer's consent." : "WhatsApp opt-in removed."} : {error:"Customer not found."}, updated.count ? 200 : 404);
-  }
   if (intent === "create-campaign") {
     const name = field(data,"name").slice(0,120) || "Bowchika campaign";
     const templateId = field(data,"templateId");
@@ -665,6 +708,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     let recipientCount = 0;
     let afterId: string | undefined;
     const seenPhones = new Set<string>();
+    const suppressionRows = await prisma.whatsAppContactSuppression.findMany({
+      where: { shop: session.shop },
+      select: { phoneNumber: true },
+    });
+    const suppressedPhones = new Set(suppressionRows.map((item) => item.phoneNumber));
     try {
       let hasMoreRecipients = true;
       while (hasMoreRecipients) {
@@ -678,7 +726,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if (!customers.length) break;
         const recipients = customers.flatMap((customer) => {
           const phoneNumber = normalizeE164Phone(customer.phone ?? "");
-          if (!phoneNumber || seenPhones.has(phoneNumber)) return [];
+          if (!phoneNumber || seenPhones.has(phoneNumber) || suppressedPhones.has(phoneNumber)) return [];
           seenPhones.add(phoneNumber);
           let tags: string[] = [];
           try { tags = JSON.parse(customer.tagsJson || "[]") as string[]; } catch { tags = []; }
@@ -731,7 +779,6 @@ export default function CampaignCenter() {
   const fetcher = useFetcher<CampaignActionData>();
   const syncFetcher = useFetcher<CampaignActionData>();
   const autoSyncContinuation = useRef<string | null>(null);
-  const consentFetcher = useFetcher<CampaignActionData>();
   const importFetcher = useFetcher<CampaignActionData>();
   const [csvFileKey, setCsvFileKey] = useState("");
   const [query,setQuery] = useState(data.search);
@@ -791,13 +838,13 @@ export default function CampaignCenter() {
 
     {(syncFetcher.data?.message || data.syncJob) && <p role="status">{syncFetcher.data?.message || ("Last sync: " + data.syncJob?.status + " · " + (data.syncJob?.customersProcessed ?? 0).toLocaleString("en-IN") + " customers · " + (data.syncJob?.ordersProcessed ?? 0).toLocaleString("en-IN") + " orders")}</p>}
     {syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{syncFetcher.data.error}</p>}
-    {data.syncJob?.lastError && !syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{data.syncJob.lastError}</p>}{typeof fetcher.data?.success === "string" && <p role="status">{fetcher.data.success}</p>}{fetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{fetcher.data.error}</p>}{typeof consentFetcher.data?.success === "string" && <p role="status">{consentFetcher.data.success}</p>}{consentFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{consentFetcher.data.error}</p>}
+    {data.syncJob?.lastError && !syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{data.syncJob.lastError}</p>}{typeof fetcher.data?.success === "string" && <p role="status">{fetcher.data.success}</p>}{fetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{fetcher.data.error}</p>}
     <form method="get" style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}><input name="q" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search name, email, phone, order ID" style={{...style,flex:1,minWidth:220}}/><label style={{display:"flex",gap:6,alignItems:"center"}}><input type="checkbox" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label><input type="hidden" name="ordered" value={String(orderedOnly)}/><button style={style}>Search</button></form>
     <fetcher.Form method="post" onSubmit={e=>{if(!window.confirm("Save a campaign for the selected audience? Only recipients with verified WhatsApp opt-in are eligible.")){e.preventDefault();return;}}}>
       <input type="hidden" name="intent" value="create-campaign"/><input type="hidden" name="selectAllMatching" value={String(selectAllMatching)}/><input type="hidden" name="audienceSearch" value={query}/><input type="hidden" name="orderedOnly" value={String(orderedOnly)}/>{selected.map(id=><input key={id} type="hidden" name="customerId" value={id}/>)}
       <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}><button type="button" style={style} onClick={()=>{setSelected(data.customers.map(c=>c.id));setSelectAllMatching(true)}}>Select all matching ({data.customerCount})</button><button type="button" style={style} onClick={()=>{setSelected([]);setSelectAllMatching(false)}}>Clear selection</button><strong>{selected.length} selected</strong></div>
       {data.nextCursor && <div style={{display:"flex",justifyContent:"flex-end",marginBottom:10}}><a href={`?q=${encodeURIComponent(data.search)}&ordered=${String(data.orderedOnly)}&cursor=${encodeURIComponent(data.nextCursor)}`} style={{...style,textDecoration:"none"}}>Next 50 customers →</a></div>}
-      <div style={{overflowX:"auto",border:"1px solid #d0d5dd",borderRadius:8,marginBottom:20}}><table style={{borderCollapse:"collapse",width:"100%",minWidth:900}}><thead><tr>{["Select","Customer","Email","Phone","Orders","Latest order","WhatsApp consent"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.customers.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}><input type="checkbox" checked={selected.includes(c.id)} onChange={e=>{setSelectAllMatching(false);setSelected(old=>e.target.checked?[...new Set([...old,c.id])]:old.filter(id=>id!==c.id))}}/></td><td style={{padding:10}}>{[c.firstName,c.lastName].filter(Boolean).join(" ")||"Unnamed"}</td><td style={{padding:10}}>{c.email||"—"}</td><td style={{padding:10}}>{c.phone||"—"}</td><td style={{padding:10}}>{c.numberOfOrders}</td><td style={{padding:10}}>{c.latestOrder?.orderName||"—"}</td><td style={{padding:10}}><button style={style} type="button" onClick={()=>{const consentData=new FormData();consentData.set("intent","consent");consentData.set("customerId",c.id);consentData.set("optedIn",String(!c.whatsappOptIn));consentFetcher.submit(consentData,{method:"post"});}}>{c.whatsappOptIn?"Opted in ✓":"Record verified opt-in"}</button></td></tr>)}</tbody></table></div>
+      <div style={{overflowX:"auto",border:"1px solid #d0d5dd",borderRadius:8,marginBottom:20}}><table style={{borderCollapse:"collapse",width:"100%",minWidth:900}}><thead><tr>{["Select","Customer","Email","Phone","Orders","Latest order","WhatsApp consent"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.customers.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}><input type="checkbox" checked={selected.includes(c.id)} onChange={e=>{setSelectAllMatching(false);setSelected(old=>e.target.checked?[...new Set([...old,c.id])]:old.filter(id=>id!==c.id))}}/></td><td style={{padding:10}}>{[c.firstName,c.lastName].filter(Boolean).join(" ")||"Unnamed"}</td><td style={{padding:10}}>{c.email||"—"}</td><td style={{padding:10}}>{c.phone||"—"}</td><td style={{padding:10}}>{c.numberOfOrders}</td><td style={{padding:10}}>{c.latestOrder?.orderName||"—"}</td><td style={{padding:10}}><strong>{c.whatsappOptOutAt ? "Suppressed" : c.whatsappConsentState}</strong><div style={{fontSize:12,color:"#667085"}}>{c.whatsappConsentUpdatedAt ? new Date(c.whatsappConsentUpdatedAt).toLocaleDateString("en-IN") : "No Shopify consent record"}</div></td></tr>)}</tbody></table></div>
       <h2>Create campaign</h2><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
       <label>Campaign name<input name="name" value={name} onChange={e=>setName(e.target.value)} style={{...style,width:"100%",marginTop:6}}/></label>
       <label>Approved template<select name="templateId" value={chosenTemplate} onChange={e=>setChosenTemplate(e.target.value)} style={{...style,width:"100%",marginTop:6}}>{data.templates.map(t=><option key={t.id} value={t.id}>{t.name} · {t.language}</option>)}</select></label>
