@@ -96,7 +96,11 @@ model ShopifyCustomerMirror {
 model ShopifyOrderMirror {
   id String @id
   shop String
-  customerId String
+  customerId String?
+  customerEmail String?
+  customerPhone String?
+  customerName String?
+  csvImportedAt DateTime?
   orderName String
   orderNumber Int?
   processedAt DateTime?
@@ -107,10 +111,12 @@ model ShopifyOrderMirror {
   fulfillmentStatus String?
   lineItemsJson String @default("[]")
   syncedAt DateTime @default(now())
-  customer ShopifyCustomerMirror @relation(fields: [shop, customerId], references: [shop, id], onDelete: Cascade)
+  customer ShopifyCustomerMirror? @relation(fields: [shop, customerId], references: [shop, id], onDelete: Cascade)
   @@unique([shop, id])
   @@index([shop, customerId, processedAt])
   @@index([shop, orderName])
+  @@index([shop, customerEmail])
+  @@index([shop, customerPhone])
 }
 model WhatsAppCampaign {
   id String @id @default(cuid())
