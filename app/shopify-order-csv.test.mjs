@@ -3,9 +3,9 @@ import { parseShopifyOrderCsv } from "./shopify-order-csv.server.ts";
 
 const csv = [
   "Name,Email,Financial Status,Paid at,Fulfillment Status,Currency,Total,Created at,Lineitem quantity,Lineitem name,Lineitem price,Lineitem sku,Billing Name,Phone,Id,Notes,Note Attributes",
-  '#1538,customer@example.com,paid,"2026-11-11 00:21:30 +0530",unfulfilled,INR,949.05,"2026-11-11 00:21:29 +0530",1,"Raze – Blast Artist, Valorant Tee",999.00,SKU-1,Customer,"+918013268316",19015108985061,"note with a comma, and a newline
-second line","attribute: value"',
-  ',,,,,,,,,Shipping protection,0.00,,customer,,19015108985061,,',
+  `#1538,customer@example.com,paid,"2026-11-11 00:21:30 +0530",unfulfilled,INR,949.05,"2026-11-11 00:21:29 +0530",1,"Raze – Blast Artist, Valorant Tee",999.00,SKU-1,Customer,"+918013268316",19015108985061,"note with a comma, and a newline
+second line","attribute: value"`,
+  ",,,,,,,,,Shipping protection,0.00,,customer,,19015108985061,,",
   '#1537,second@example.com,partially_paid,,unfulfilled,INR,999.00,"2026-11-10 00:39:00 +0530",1,"Omen Shadow Reaper Tee",999.00,SKU-2,Second,"+919515406470",19012977197285,,',
 ].join("\r\n");
 
