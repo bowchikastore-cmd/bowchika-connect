@@ -138,6 +138,7 @@ model WhatsAppCampaign {
   templateLanguage String
   templateComponents String
   variableMappingJson String @default("{}")
+  audienceCriteriaJson String @default("{}")
   mediaUrl String?
   scheduledAt DateTime?
   status String @default("DRAFT")
