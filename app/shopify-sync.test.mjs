@@ -149,6 +149,28 @@ try {
     assert.ok(completed.completedAt);
   });
 
+  await check("historical CSV orders can be stored before customer reconciliation", async () => {
+    const csvOrderId = `gid://shopify/Order/${suffix}-csv`;
+    const imported = await prisma.shopifyOrderMirror.create({
+      data: {
+        id: csvOrderId,
+        shop,
+        customerId: null,
+        customerEmail: `${suffix}@example.test`,
+        customerPhone: "+919000000099",
+        customerName: "CSV Import Test",
+        csvImportedAt: new Date(),
+        orderName: "#CSV-1",
+        totalPrice: 1499,
+        currencyCode: "INR",
+        lineItemsJson: JSON.stringify([{ name: "Historical test product", quantity: 1 }]),
+      },
+    });
+    assert.equal(imported.customerId, null);
+    assert.equal(imported.customerEmail, `${suffix}@example.test`);
+    assert.ok(imported.csvImportedAt);
+  });
+
   console.log(`Passed ${checks.length} Shopify sync checkpoint tests.`);
 } finally {
   await prisma.shopifyOrderMirror.deleteMany({ where: { shop } });
