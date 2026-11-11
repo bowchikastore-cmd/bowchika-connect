@@ -31,7 +31,7 @@ const resolveValue=(path:string,snapshot:JsonRecord,campaign:JsonRecord):unknown
 export const action=async({request}:ActionFunctionArgs)=>{
   if(request.method!=="POST") return new Response("Method not allowed",{status:405});
   if(!isAuthorized(request)) return new Response("Not found",{status:404});
-  if(!isWhatsAppCampaignSendingEnabled()) return json({error:"Campaign sending is disabled by its dedicated safety switch."},503);
+  if(!isWhatsAppCampaignSendingEnabled()) return json({ok:true,disabled:true,processed:0,campaigns:0});
   const configuredShop=getConfiguredWhatsAppShop();
   if(!configuredShop) return json({error:"WhatsApp shop configuration missing."},503);
   let config;
