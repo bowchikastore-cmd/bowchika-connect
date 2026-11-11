@@ -7,7 +7,7 @@ embedded = true
 name = "bowchika-connect"
 
 [access_scopes]
-scopes = "read_customers,read_orders"
+scopes = "read_customers,read_orders,read_products"
 
 [webhooks]
 api_version = "2026-10"
