@@ -106,6 +106,7 @@ model ShopifyOrderMirror {
   customerPhone String?
   customerName String?
   csvImportedAt DateTime?
+  updatedAtShopify DateTime?
   orderName String
   orderNumber Int?
   processedAt DateTime?
@@ -223,6 +224,8 @@ model WhatsAppWebhookVerification {
 model ShopifySyncJob {
   id                 String    @id @default(cuid())
   shop               String
+  mode               String    @default("FULL")
+  incrementalSince   DateTime?
   status             String    @default("RUNNING")
   phase              String    @default("CUSTOMERS")
   customerCursor     String?
@@ -230,6 +233,7 @@ model ShopifySyncJob {
   customersProcessed Int       @default(0)
   ordersProcessed    Int       @default(0)
   ordersSkipped      Int       @default(0)
+  ordersUnlinked     Int       @default(0)
   customerPages      Int       @default(0)
   orderPages         Int       @default(0)
   lastError          String?

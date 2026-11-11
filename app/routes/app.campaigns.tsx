@@ -5,6 +5,7 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { normalizeE164Phone, getWhatsAppTemplateRequirements } from "../whatsapp-shared";
 import { parseShopifyOrderCsv } from "../shopify-order-csv.server";
+import { buildUpdatedAtSearchQuery, getIncrementalSyncSince } from "../shopify-sync.shared";
 
 const json = (body: object, status = 200) => Response.json(body, { status });
 const field = (data: FormData, key: string) => String(data.get(key) ?? "").trim();
@@ -19,6 +20,7 @@ type CampaignActionData = {
   customersProcessed?: number;
   ordersProcessed?: number;
   ordersSkipped?: number;
+  ordersUnlinked?: number;
   hasMore?: boolean;
   continuation?: string;
   importPreview?: {
@@ -58,9 +60,23 @@ type ShopifyOrderNode = {
   number: number | null;
   createdAt: string | null;
   processedAt: string | null;
+  updatedAt: string | null;
   displayFinancialStatus: string | null;
   displayFulfillmentStatus: string | null;
-  customer?: { id: string } | null;
+  customer?: {
+    id: string;
+    firstName?: string | null;
+    lastName?: string | null;
+    defaultEmailAddress?: { emailAddress: string | null } | null;
+    defaultPhoneNumber?: { phoneNumber: string | null } | null;
+    numberOfOrders?: number;
+    amountSpent?: { amount: string; currencyCode: string } | null;
+    tags?: string[];
+    updatedAt?: string | null;
+  } | null;
+  email: string | null;
+  phone: string | null;
+  billingAddress?: { phone: string | null; name: string | null } | null;
   totalPriceSet?: { shopMoney?: { amount: string; currencyCode: string } | null } | null;
   lineItems?: { nodes?: Array<{ name: string; quantity: number; sku: string | null; variantTitle: string | null }> | null } | null;
 };
@@ -75,7 +91,23 @@ const orderQuery = `#graphql
 query BowchikaOrderMirror($after: String) {
   orders(first: 100, after: $after, sortKey: CREATED_AT, reverse: true) {
     pageInfo { hasNextPage endCursor }
-    nodes { id name number createdAt processedAt displayFinancialStatus displayFulfillmentStatus customer { id } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
+    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName updatedAt tags numberOfOrders amountSpent { amount currencyCode } defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber } } email phone billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
+  }
+}`;
+
+const incrementalCustomerQuery = `#graphql
+query BowchikaIncrementalCustomers($after: String, $query: String) {
+  customers(first: 100, after: $after, query: $query, sortKey: UPDATED_AT) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id firstName lastName createdAt updatedAt tags numberOfOrders defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber } amountSpent { amount currencyCode } }
+  }
+}`;
+
+const incrementalOrderQuery = `#graphql
+query BowchikaIncrementalOrders($after: String, $query: String) {
+  orders(first: 100, after: $after, query: $query, sortKey: UPDATED_AT) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber } } billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
   }
 }`;
 
@@ -247,21 +279,51 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
   }
 
-  if (intent === "sync" || intent === "sync-next") {
+  if (intent === "sync" || intent === "sync-incremental" || intent === "sync-next") {
     const shop = session.shop;
     let job = await prisma.shopifySyncJob.findUnique({ where: { id: shop } });
 
-    if (intent === "sync") {
+    if (intent === "sync-incremental") {
+      if (!job || job.status !== "COMPLETED" || !job.completedAt) {
+        return json({ error: "Complete the initial full Shopify sync before starting incremental sync." }, 409);
+      }
+      const incrementalSince = getIncrementalSyncSince(job.completedAt);
+      job = await prisma.shopifySyncJob.update({
+        where: { id: shop },
+        data: {
+          mode: "INCREMENTAL",
+          incrementalSince,
+          status: "RUNNING",
+          phase: "CUSTOMERS_INCREMENTAL",
+          customerCursor: null,
+          orderCursor: null,
+          customersProcessed: 0,
+          ordersProcessed: 0,
+          ordersSkipped: 0,
+          ordersUnlinked: 0,
+          customerPages: 0,
+          orderPages: 0,
+          lastError: null,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          startedAt: new Date(),
+          completedAt: null,
+        },
+      });
+    } else if (intent === "sync") {
       if (!job || job.status === "COMPLETED") {
         job = await prisma.shopifySyncJob.upsert({
           where: { id: shop },
           create: {
             id: shop,
             shop,
+            mode: "FULL",
             status: "RUNNING",
             phase: "CUSTOMERS",
           },
           update: {
+            mode: "FULL",
+            incrementalSince: null,
             status: "RUNNING",
             phase: "CUSTOMERS",
             customerCursor: null,
@@ -269,6 +331,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             customersProcessed: 0,
             ordersProcessed: 0,
             ordersSkipped: 0,
+            ordersUnlinked: 0,
             customerPages: 0,
             orderPages: 0,
             lastError: null,
@@ -315,11 +378,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     try {
-      if (job.phase === "CUSTOMERS") {
-        const response = await admin.graphql(customerQuery, {
-          variables: { after: job.customerCursor ?? null },
-          signal: AbortSignal.timeout(20_000),
-        });
+      if (job.phase === "CUSTOMERS" || job.phase === "CUSTOMERS_INCREMENTAL") {
+        const incremental = job.phase === "CUSTOMERS_INCREMENTAL";
+        if (incremental && !job.incrementalSince) {
+          throw new Error("The incremental customer checkpoint is missing. Run a full sync and retry.");
+        }
+        const response = await admin.graphql(
+          incremental ? incrementalCustomerQuery : customerQuery,
+          {
+            variables: incremental
+              ? { after: job.customerCursor ?? null, query: buildUpdatedAtSearchQuery(job.incrementalSince!) }
+              : { after: job.customerCursor ?? null },
+            signal: AbortSignal.timeout(20_000),
+          },
+        );
         const result = await response.json() as {
           errors?: unknown[];
           data?: {
@@ -364,7 +436,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if (hasNextPage && (!nextCursor || nextCursor === job.customerCursor)) {
           throw new Error("Shopify customer pagination returned a missing or repeated cursor. Resume after checking the Shopify response.");
         }
-        const nextPhase = hasNextPage ? "CUSTOMERS" : "ORDERS";
+        const nextPhase = hasNextPage
+          ? job.phase
+          : incremental
+            ? "ORDERS_INCREMENTAL"
+            : "ORDERS";
         const saved = await prisma.shopifySyncJob.updateMany({
           where: { id: shop, shop, leaseToken },
           data: {
@@ -391,11 +467,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         });
       }
 
-      if (job.phase === "ORDERS") {
-        const response = await admin.graphql(orderQuery, {
-          variables: { after: job.orderCursor ?? null },
-          signal: AbortSignal.timeout(20_000),
-        });
+      if (job.phase === "ORDERS" || job.phase === "ORDERS_INCREMENTAL") {
+        const incremental = job.phase === "ORDERS_INCREMENTAL";
+        if (incremental && !job.incrementalSince) {
+          throw new Error("The incremental order checkpoint is missing. Run a full sync and retry.");
+        }
+        const response = await admin.graphql(
+          incremental ? incrementalOrderQuery : orderQuery,
+          {
+            variables: incremental
+              ? { after: job.orderCursor ?? null, query: buildUpdatedAtSearchQuery(job.incrementalSince!) }
+              : { after: job.orderCursor ?? null },
+            signal: AbortSignal.timeout(20_000),
+          },
+        );
         const result = await response.json() as {
           errors?: unknown[];
           data?: {
@@ -412,29 +497,52 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
 
         const orders = connection.nodes ?? [];
-        const customerIds = [...new Set(orders.flatMap((order) => order.customer?.id ? [order.customer.id] : []))];
-        const customers = customerIds.length
-          ? await prisma.shopifyCustomerMirror.findMany({
-              where: { shop, id: { in: customerIds } },
-              select: { id: true },
-            })
-          : [];
-        const knownCustomerIds = new Set(customers.map((customer) => customer.id));
-        let skipped = 0;
+        const customerNodes = new Map(
+          orders.flatMap((order) => order.customer ? [[order.customer.id, order.customer] as const] : []),
+        );
+        const customerWrites = [...customerNodes.values()].map((customer) => {
+          const customerFields = {
+            firstName: customer.firstName ?? null,
+            lastName: customer.lastName ?? null,
+            email: customer.defaultEmailAddress?.emailAddress ?? null,
+            phone: customer.defaultPhoneNumber?.phoneNumber ?? null,
+            numberOfOrders: Number(customer.numberOfOrders ?? 0),
+            amountSpent: Number(customer.amountSpent?.amount ?? 0),
+            currencyCode: customer.amountSpent?.currencyCode ?? "INR",
+            tagsJson: JSON.stringify(customer.tags ?? []),
+            updatedAtShopify: customer.updatedAt ? new Date(customer.updatedAt) : null,
+            syncedAt: new Date(),
+          };
+          return prisma.shopifyCustomerMirror.upsert({
+            where: { id: customer.id },
+            create: { id: customer.id, shop, ...customerFields },
+            update: customerFields,
+          });
+        });
+        if (customerWrites.length) await prisma.$transaction(customerWrites);
+        const knownCustomerIds = new Set(customerNodes.keys());
+        let unlinked = 0;
         const now = new Date();
-        const writes = orders.flatMap((order) => {
-          const customerId = order.customer?.id;
-          if (!customerId || !knownCustomerIds.has(customerId)) {
-            skipped++;
-            return [];
-          }
+        const writes = orders.map((order) => {
+          const requestedCustomerId = order.customer?.id ?? null;
+          const customerId = requestedCustomerId && knownCustomerIds.has(requestedCustomerId)
+            ? requestedCustomerId
+            : null;
+          if (!customerId) unlinked++;
+          const customerName = [order.customer?.firstName, order.customer?.lastName]
+            .filter(Boolean)
+            .join(" ") || order.billingAddress?.name || null;
           const fields = {
             shop,
             customerId,
+            customerEmail: order.customer?.defaultEmailAddress?.emailAddress ?? order.email ?? null,
+            customerPhone: order.customer?.defaultPhoneNumber?.phoneNumber ?? order.phone ?? order.billingAddress?.phone ?? null,
+            customerName,
             orderName: order.name,
             orderNumber: order.number ?? null,
             createdAtShopify: order.createdAt ? new Date(order.createdAt) : null,
             processedAt: order.processedAt ? new Date(order.processedAt) : null,
+            updatedAtShopify: order.updatedAt ? new Date(order.updatedAt) : null,
             financialStatus: order.displayFinancialStatus ?? null,
             fulfillmentStatus: order.displayFulfillmentStatus ?? null,
             totalPrice: Number(order.totalPriceSet?.shopMoney?.amount ?? 0),
@@ -442,11 +550,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             lineItemsJson: JSON.stringify(order.lineItems?.nodes ?? []),
             syncedAt: now,
           };
-          return [prisma.shopifyOrderMirror.upsert({
+          return prisma.shopifyOrderMirror.upsert({
             where: { id: order.id },
             create: { id: order.id, ...fields },
             update: fields,
-          })];
+          });
         });
         if (writes.length) await prisma.$transaction(writes);
 
@@ -458,10 +566,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const saved = await prisma.shopifySyncJob.updateMany({
           where: { id: shop, shop, leaseToken },
           data: {
-            phase: "ORDERS",
+            phase: hasNextPage ? job.phase : "ORDERS",
             orderCursor: nextCursor,
             ordersProcessed: { increment: writes.length },
-            ordersSkipped: { increment: skipped },
+            ordersSkipped: { increment: 0 },
+            ordersUnlinked: { increment: unlinked },
             orderPages: { increment: 1 },
             lastError: null,
             status: hasNextPage ? "RUNNING" : "COMPLETED",
@@ -475,12 +584,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return json({
           message: hasNextPage
             ? "Order sync progress: " + latest.ordersProcessed.toLocaleString("en-IN") + " imported; " + latest.ordersSkipped.toLocaleString("en-IN") + " skipped. Continuing…"
-            : "Sync complete: " + latest.customersProcessed.toLocaleString("en-IN") + " customers, " + latest.ordersProcessed.toLocaleString("en-IN") + " orders imported, " + latest.ordersSkipped.toLocaleString("en-IN") + " orders skipped because they had no matching local customer.",
+            : (incremental
+              ? "Incremental sync complete: "
+              : "Full sync complete: ")
+              + latest.customersProcessed.toLocaleString("en-IN") + " customers checked, "
+              + latest.ordersProcessed.toLocaleString("en-IN") + " orders upserted, "
+              + latest.ordersUnlinked.toLocaleString("en-IN") + " orders stored without a linked local customer. A 24-hour overlap protects updates made during the previous sync; Shopify order access still follows the store's approved API scopes.",
           syncJobId: shop,
           syncPhase: latest.phase,
           customersProcessed: latest.customersProcessed,
           ordersProcessed: latest.ordersProcessed,
           ordersSkipped: latest.ordersSkipped,
+          ordersUnlinked: latest.ordersUnlinked,
           hasMore: hasNextPage,
           continuation: hasNextPage ? latest.phase + "|" + (latest.customerCursor ?? "") + "|" + (latest.orderCursor ?? "") + "|" + latest.customerPages + "|" + latest.orderPages : undefined,
         });
@@ -505,6 +620,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         customersProcessed: job.customersProcessed,
         ordersProcessed: job.ordersProcessed,
         ordersSkipped: job.ordersSkipped,
+        ordersUnlinked: job.ordersUnlinked,
       }, 500);
     }
   }
@@ -645,13 +761,15 @@ export default function CampaignCenter() {
     <h1>Shopify customers → WhatsApp campaigns</h1>
     <p>Synced customer and order records, full-store search, bulk selection, approved template mapping and scheduled campaign drafts.</p>
     <syncFetcher.Form method="post" onSubmit={() => { autoSyncContinuation.current = null; }} style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
-      <input type="hidden" name="intent" value="sync"/>
-      <button style={style} disabled={syncFetcher.state!=="idle"}>
-        {data.syncJob?.status === "RUNNING" ? "Resume customer & order sync" : "Sync all Shopify customers & orders"}
+      <button name="intent" value="sync" style={style} disabled={syncFetcher.state!=="idle"}>
+        {data.syncJob?.status === "RUNNING" ? "Resume current sync" : "Run full sync (all accessible records)"}
+      </button>
+      <button name="intent" value="sync-incremental" style={{...style,background:"#e8f5ee",borderColor:"#a6d7b8"}} disabled={syncFetcher.state!=="idle" || data.syncJob?.status === "RUNNING" || !data.syncJob?.completedAt}>
+        Sync new & updated only
       </button>
       <span>{data.customerCount.toLocaleString("en-IN")} local customers · {data.orderCount.toLocaleString("en-IN")} local orders</span>
     </syncFetcher.Form>
-    <p style={{fontSize:13,color:"#667085",marginTop:0}}>Sync runs in resumable 100-record Shopify pages. Keep this page open while it processes; after interruption, press Resume. Shopify exposes only the default recent 60-day order window unless the app receives read_all_orders approval.</p>
+    <p style={{fontSize:13,color:"#667085",marginTop:0}}>Use incremental sync for normal daily updates. It checks Shopify customers and orders changed since the previous completed sync, with a 24-hour overlap to catch late updates safely; records are upserted by Shopify ID. A full sync is only for initial setup or deliberate reconciliation. Shopify exposes only the default recent 60-day order window unless the app receives read_all_orders approval.</p>
     <div style={{padding:14,border:"1px solid #d0d5dd",borderRadius:8,margin:"16px 0",background:"white"}}>
       <h2 style={{marginTop:0}}>Import historical Shopify orders</h2>
       <p style={{fontSize:13,color:"#667085"}}>Upload the Shopify Orders CSV export. Bowchika Connect groups line items by Shopify order ID, matches customers by unique email/phone, and keeps existing API orders instead of duplicating or overwriting them. Unmatched orders are still stored, but remain unlinked until they can be matched.</p>

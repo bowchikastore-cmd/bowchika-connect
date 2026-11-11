@@ -171,6 +171,55 @@ try {
     assert.ok(imported.csvImportedAt);
   });
 
+  await check("incremental sync keeps its timestamp checkpoint across customer and order pages", async () => {
+    const fullSyncCompletedAt = new Date("2026-11-11T06:00:00.000Z");
+    const incrementalSince = new Date(fullSyncCompletedAt.getTime() - 24 * 60 * 60 * 1000);
+    await prisma.shopifySyncJob.update({
+      where: { id: shop },
+      data: {
+        mode: "INCREMENTAL",
+        incrementalSince,
+        status: "RUNNING",
+        phase: "CUSTOMERS_INCREMENTAL",
+        completedAt: null,
+        customerCursor: null,
+        orderCursor: null,
+      },
+    });
+    let job = await prisma.shopifySyncJob.findUniqueOrThrow({ where: { id: shop } });
+    assert.equal(job.mode, "INCREMENTAL");
+    assert.equal(job.incrementalSince?.toISOString(), "2026-11-10T06:00:00.000Z");
+
+    await prisma.shopifySyncJob.update({
+      where: { id: shop },
+      data: { phase: "ORDERS_INCREMENTAL", customerCursor: null },
+    });
+    await prisma.shopifySyncJob.update({
+      where: { id: shop },
+      data: { phase: "ORDERS_INCREMENTAL", orderCursor: "incremental-order-cursor" },
+    });
+    job = await prisma.shopifySyncJob.findUniqueOrThrow({ where: { id: shop } });
+    assert.equal(job.phase, "ORDERS_INCREMENTAL");
+    assert.equal(job.orderCursor, "incremental-order-cursor");
+    assert.equal(job.incrementalSince?.toISOString(), "2026-11-10T06:00:00.000Z");
+
+    await prisma.shopifySyncJob.update({
+      where: { id: shop },
+      data: {
+        phase: "ORDERS",
+        orderCursor: null,
+        status: "COMPLETED",
+        completedAt: new Date(),
+        leaseToken: null,
+        leaseExpiresAt: null,
+      },
+    });
+    job = await prisma.shopifySyncJob.findUniqueOrThrow({ where: { id: shop } });
+    assert.equal(job.status, "COMPLETED");
+    assert.equal(job.mode, "INCREMENTAL");
+    assert.equal(job.incrementalSince?.toISOString(), "2026-11-10T06:00:00.000Z");
+  });
+
   console.log(`Passed ${checks.length} Shopify sync checkpoint tests.`);
 } finally {
   await prisma.shopifyOrderMirror.deleteMany({ where: { shop } });

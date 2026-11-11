@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - "fix/**"
+      - "feat/**"
 
 permissions:
   contents: read
@@ -42,6 +43,8 @@ jobs:
         run: npx vite-node app/whatsapp-safety.test.mjs
       - name: Shopify sync checkpoint tests
         run: npx vite-node app/shopify-sync.test.mjs
+      - name: Incremental Shopify sync checkpoint tests
+        run: npx vite-node app/shopify-sync.shared.test.mjs
       - name: Shopify order CSV parser tests
         run: npx vite-node app/shopify-order-csv.test.mjs
       - name: Production build
