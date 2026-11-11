@@ -83,6 +83,11 @@ model ShopifyCustomerMirror {
   currencyCode String @default("INR")
   tagsJson String @default("[]")
   whatsappOptIn Boolean @default(false)
+  whatsappConsentState String @default("NEVER_SUBSCRIBED")
+  whatsappConsentUpdatedAt DateTime?
+  whatsappConsentCollectedFrom String?
+  whatsappConsentOptInLevel String?
+  whatsappOptOutAt DateTime?
   createdAtShopify DateTime?
   updatedAtShopify DateTime?
   syncedAt DateTime @default(now())
@@ -128,6 +133,7 @@ model WhatsAppCampaign {
   templateLanguage String
   templateComponents String
   variableMappingJson String @default("{}")
+  audienceCriteriaJson String @default("{}")
   mediaUrl String?
   scheduledAt DateTime?
   status String @default("DRAFT")
@@ -161,6 +167,18 @@ model WhatsAppCampaignRecipient {
   @@index([shop, status, queuedAt])
   @@index([shop, whatsappMessageId])
 }
+model WhatsAppContactSuppression {
+  id String @id @default(cuid())
+  shop String
+  phoneNumber String
+  reason String @default("OPT_OUT_KEYWORD")
+  lastOptOutAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([shop, phoneNumber])
+  @@index([shop, lastOptOutAt])
+}
+
 model WhatsAppConversation {
   id            String            @id @default(cuid())
   shop          String

@@ -134,7 +134,8 @@ try {
         },
       }),
     });
-    assert.equal(blocked.status, 503);
+    assert.equal(blocked.status, 200);
+    assert.equal((await blocked.json()).disabled, true);
     process.env.WHATSAPP_INBOX_SENDING_ENABLED = "false";
 
     const health = await campaignWorkerLoader({
@@ -437,7 +438,7 @@ try {
     assert.equal(mediaMessage?.text, "Local image caption");
   });
 
-  await check("spaced opt-out keyword immediately revokes local campaign eligibility", async () => {
+  await check("spaced opt-out keyword creates phone suppression and revokes local campaign eligibility", async () => {
     const customerId = `gid://shopify/Customer/${randomUUID()}`;
     await prisma.shopifyCustomerMirror.create({
       data: {
@@ -446,6 +447,7 @@ try {
         firstName: "Opt Out Test",
         phone: recipient,
         whatsappOptIn: true,
+        whatsappConsentState: "SUBSCRIBED",
       },
     });
     const optOutMessageId = `wamid.local.${randomUUID()}`;
@@ -463,6 +465,12 @@ try {
       where: { id: customerId },
     });
     assert.equal(updated.whatsappOptIn, false);
+    assert.ok(updated.whatsappOptOutAt);
+    const suppression = await prisma.whatsAppContactSuppression.findUnique({
+      where: { shop_phoneNumber: { shop, phoneNumber: recipient } },
+    });
+    assert.equal(suppression?.reason, "OPT_OUT_KEYWORD");
+    await prisma.whatsAppContactSuppression.deleteMany({ where: { shop, phoneNumber: recipient } });
     await prisma.shopifyCustomerMirror.delete({ where: { id: customerId } });
   });
 

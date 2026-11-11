@@ -31,7 +31,7 @@ const resolveValue=(path:string,snapshot:JsonRecord,campaign:JsonRecord):unknown
 export const action=async({request}:ActionFunctionArgs)=>{
   if(request.method!=="POST") return new Response("Method not allowed",{status:405});
   if(!isAuthorized(request)) return new Response("Not found",{status:404});
-  if(!isWhatsAppCampaignSendingEnabled()) return json({error:"Campaign sending is disabled by its dedicated safety switch."},503);
+  if(!isWhatsAppCampaignSendingEnabled()) return json({ok:true,disabled:true,processed:0,campaigns:0});
   const configuredShop=getConfiguredWhatsAppShop();
   if(!configuredShop) return json({error:"WhatsApp shop configuration missing."},503);
   let config;
@@ -76,10 +76,17 @@ export const action=async({request}:ActionFunctionArgs)=>{
         data:{status:"PROCESSING",attempts:{increment:1}},
       });
       if(claim.count!==1) continue;
-      const current=recipient.customerId?await prisma.shopifyCustomerMirror.findFirst({where:{id:recipient.customerId,shop:campaign.shop},select:{whatsappOptIn:true,phone:true}}):null;
+      const current=recipient.customerId?await prisma.shopifyCustomerMirror.findFirst({
+        where:{id:recipient.customerId,shop:campaign.shop},
+        select:{whatsappOptIn:true,whatsappConsentState:true,phone:true},
+      }):null;
       const phone=normalizeE164Phone(current?.phone??recipient.phoneNumber);
-      if(!current?.whatsappOptIn || !phone || phone!==normalizeE164Phone(recipient.phoneNumber)){
-        await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"SKIPPED",error:"WhatsApp opt-in is missing/revoked or recipient phone changed."}});
+      const suppression = await prisma.whatsAppContactSuppression.findUnique({
+        where:{shop_phoneNumber:{shop:campaign.shop,phoneNumber:normalizeE164Phone(recipient.phoneNumber)??recipient.phoneNumber}},
+        select:{id:true},
+      });
+      if(!current?.whatsappOptIn || current.whatsappConsentState!=="SUBSCRIBED" || suppression || !phone || phone!==normalizeE164Phone(recipient.phoneNumber)){
+        await prisma.whatsAppCampaignRecipient.update({where:{id:recipient.id},data:{status:"SKIPPED",error:"Verified Shopify WhatsApp marketing consent is missing/revoked, the phone is suppressed, or the recipient phone changed."}});
         processed++; continue;
       }
       const snapshot=JSON.parse(recipient.snapshotJson||"{}") as JsonRecord;

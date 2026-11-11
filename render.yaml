@@ -42,3 +42,15 @@ services:
         sync: false
       - key: META_GRAPH_API_VERSION
         value: v23.0
+  - type: cron
+    name: bowchika-campaign-worker
+    runtime: node
+    plan: starter
+    schedule: "*/5 * * * *"
+    buildCommand: npm ci --include=dev
+    startCommand: node scripts/run-campaign-worker.mjs
+    envVars:
+      - key: CAMPAIGN_WORKER_URL
+        value: https://bowchika-connect.onrender.com/api/campaign-worker
+      - key: CAMPAIGN_WORKER_SECRET
+        sync: false
