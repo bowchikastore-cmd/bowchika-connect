@@ -17,6 +17,8 @@ type CampaignActionData = {
   message?: string;
   error?: string;
   campaignId?: string;
+  mediaUrl?: string;
+  mediaAlt?: string;
   syncJobId?: string;
   syncPhase?: string;
   customersProcessed?: number;
@@ -935,12 +937,6 @@ export default function CampaignCenter() {
     }
   }, [imageFetcher.state, imageFetcher.data]);
 
-  useEffect(() => {
-    if (!template) return;
-    setVariableMapping({});
-    setCustomMapping({});
-  }, [chosenTemplate]);
-
   const pickShopifyImage = async () => {
     setImagePickerBusy(true);
     setImagePickerError("");
@@ -1026,10 +1022,6 @@ export default function CampaignCenter() {
     /\\{\\{\\s*([A-Za-z0-9_]+)\\s*\\}\\}/g,
     (_match, key: string) => previewValue(section, key),
   );
-  const currentPreviewComponents = requirements ? (() => {
-    try { return JSON.parse(template?.components || "[]") as Array<{type?:string;text?:string;format?:string}>; }
-    catch { return []; }
-  })() : [];
   const previewHeader = requirements?.header?.format === "TEXT"
     ? previewText(requirements.header.text, "header")
     : "";
@@ -1102,9 +1094,9 @@ export default function CampaignCenter() {
       <label>Minimum orders<input name="minOrders" type="number" min="0" value={minOrders} onChange={e=>setMinOrders(e.target.value)} placeholder="e.g. 2" style={{...inputStyle,marginTop:6}}/></label>
       <label>Maximum orders<input name="maxOrders" type="number" min="0" value={maxOrders} onChange={e=>setMaxOrders(e.target.value)} placeholder="Any" style={{...inputStyle,marginTop:6}}/></label>
       <label>Minimum lifetime spend<input name="minSpend" type="number" min="0" value={minSpend} onChange={e=>setMinSpend(e.target.value)} placeholder="Amount in INR" style={{...inputStyle,marginTop:6}}/></label>
-      <label>Last order<input name="lastOrderDays" value={lastOrderDays} onChange={e=>setLastOrderDays(e.target.value)} style={{...inputStyle,marginTop:6}} as="select">
+      <label>Last order<select name="lastOrderDays" value={lastOrderDays} onChange={e=>setLastOrderDays(e.target.value)} style={{...inputStyle,marginTop:6}}>
         <option value="">Any time</option><option value="30">Last 30 days</option><option value="60">Last 60 days</option><option value="90">Last 90 days</option><option value="180">Last 180 days</option><option value="365">Last 365 days</option>
-      </label>
+      </select></label>
       <label>Purchased product<input name="productQuery" value={productQuery} onChange={e=>setProductQuery(e.target.value)} placeholder="Product title or Shopify product ID" style={{...inputStyle,marginTop:6}}/></label>
       <label>Purchased collection<input name="collectionQuery" value={collectionQuery} onChange={e=>setCollectionQuery(e.target.value)} placeholder="e.g. Valorant Armory" style={{...inputStyle,marginTop:6}}/></label>
       <label style={{display:"flex",gap:8,alignItems:"center"}}><input type="checkbox" name="ordered" value="true" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label>
@@ -1121,7 +1113,7 @@ export default function CampaignCenter() {
       <div style={{overflowX:"auto",border:"1px solid #d0d5dd",borderRadius:8,marginBottom:20}}><table style={{borderCollapse:"collapse",width:"100%",minWidth:900}}><thead><tr>{["Select","Customer","Email","Phone","Orders","Latest order","WhatsApp consent"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.customers.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}><input type="checkbox" checked={selected.includes(c.id)} onChange={e=>{setSelectAllMatching(false);setSelected(old=>e.target.checked?[...new Set([...old,c.id])]:old.filter(id=>id!==c.id))}}/></td><td style={{padding:10}}>{[c.firstName,c.lastName].filter(Boolean).join(" ")||"Unnamed"}</td><td style={{padding:10}}>{c.email||"—"}</td><td style={{padding:10}}>{c.phone||"—"}</td><td style={{padding:10}}>{c.numberOfOrders}</td><td style={{padding:10}}>{c.latestOrder?.orderName||"—"}</td><td style={{padding:10}}><strong>{c.whatsappOptOutAt ? "Suppressed" : c.whatsappConsentState}</strong><div style={{fontSize:12,color:"#667085"}}>{c.whatsappConsentUpdatedAt ? new Date(c.whatsappConsentUpdatedAt).toLocaleDateString("en-IN") : "No Shopify consent record"}</div></td></tr>)}</tbody></table></div>
       <h2>Create campaign</h2><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
       <label>Campaign name<input name="name" value={name} onChange={e=>setName(e.target.value)} style={{...style,width:"100%",marginTop:6}}/></label>
-      <label>Approved template<select name="templateId" value={chosenTemplate} onChange={e=>setChosenTemplate(e.target.value)} style={{...style,width:"100%",marginTop:6}}>{data.templates.map(t=><option key={t.id} value={t.id}>{t.name} · {t.language}</option>)}</select></label>
+      <label>Approved template<select name="templateId" value={chosenTemplate} onChange={e=>{setChosenTemplate(e.target.value);setVariableMapping({});setCustomMapping({});}} style={{...style,width:"100%",marginTop:6}}>{data.templates.map(t=><option key={t.id} value={t.id}>{t.name} · {t.language}</option>)}</select></label>
       <label>Schedule (blank = queue now)<input type="datetime-local" name="scheduledAt" value={scheduledAt} onChange={e=>setScheduledAt(e.target.value)} style={{...style,width:"100%",marginTop:6}}/></label>
       {requirements?.header?.format==="IMAGE"&&<div style={{display:"grid",gap:8}}>
         <label>Image header<input name="mediaUrl" value={mediaUrl} onChange={e=>setMediaUrl(e.target.value)} placeholder="Paste a public HTTPS image URL" style={{...inputStyle,marginTop:6}}/></label>
