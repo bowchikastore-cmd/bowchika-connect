@@ -196,7 +196,7 @@ const syncShopifyCustomerMirrors = async (
   if (reconsentedPhones.size) {
     operations.push(prisma.whatsAppContactSuppression.deleteMany({
       where: { shop, phoneNumber: { in: [...reconsentedPhones] } },
-    }));
+    }) as never);
   }
   await prisma.$transaction(operations as never);
 };
