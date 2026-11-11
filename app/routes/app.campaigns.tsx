@@ -544,7 +544,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const saved = await prisma.shopifySyncJob.updateMany({
           where: { id: shop, shop, leaseToken },
           data: {
-            phase: "ORDERS",
+            phase: hasNextPage ? job.phase : "ORDERS",
             orderCursor: nextCursor,
             ordersProcessed: { increment: writes.length },
             ordersSkipped: { increment: 0 },
@@ -598,6 +598,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         customersProcessed: job.customersProcessed,
         ordersProcessed: job.ordersProcessed,
         ordersSkipped: job.ordersSkipped,
+        ordersUnlinked: job.ordersUnlinked,
       }, 500);
     }
   }
