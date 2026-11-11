@@ -437,6 +437,35 @@ try {
     assert.equal(mediaMessage?.text, "Local image caption");
   });
 
+  await check("spaced opt-out keyword immediately revokes local campaign eligibility", async () => {
+    const customerId = `gid://shopify/Customer/${randomUUID()}`;
+    await prisma.shopifyCustomerMirror.create({
+      data: {
+        id: customerId,
+        shop,
+        firstName: "Opt Out Test",
+        phone: recipient,
+        whatsappOptIn: true,
+      },
+    });
+    const optOutMessageId = `wamid.local.${randomUUID()}`;
+    const response = await sendEvent({
+      messages: [{
+        id: optOutMessageId,
+        from: recipient.slice(1),
+        timestamp,
+        type: "text",
+        text: { body: "opt out" },
+      }],
+    });
+    assert.equal(response.status, 200);
+    const updated = await prisma.shopifyCustomerMirror.findUniqueOrThrow({
+      where: { id: customerId },
+    });
+    assert.equal(updated.whatsappOptIn, false);
+    await prisma.shopifyCustomerMirror.delete({ where: { id: customerId } });
+  });
+
   const { recordWhatsAppMessageAccepted } = whatsappServer;
 
   await check("delivery status updates and status-before-send-response recovery", async () => {

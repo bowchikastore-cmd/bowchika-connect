@@ -151,7 +151,7 @@ const processIncomingMessage = async (
       // A clear inbound opt-out immediately revokes local campaign eligibility.
       // Never infer opt-in from inbound keywords; explicit consent must be recorded separately.
       const inboundText = getMessageText(message, rawType).trim();
-      if (/^(stop|unsubscribe|opt\\s*out|cancel|quit)$/i.test(inboundText)) {
+      if (/^(stop|unsubscribe|opt\s*out|cancel|quit)$/i.test(inboundText)) {
         const mirroredCustomers = await transaction.shopifyCustomerMirror.findMany({
           where: { shop },
           select: { id: true, phone: true },
