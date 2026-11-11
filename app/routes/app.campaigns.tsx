@@ -4,6 +4,7 @@ import { useFetcher, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { normalizeE164Phone, getWhatsAppTemplateRequirements } from "../whatsapp-shared";
+import { parseShopifyOrderCsv } from "../shopify-order-csv.server";
 
 const json = (body: object, status = 200) => Response.json(body, { status });
 const field = (data: FormData, key: string) => String(data.get(key) ?? "").trim();
@@ -20,6 +21,24 @@ type CampaignActionData = {
   ordersSkipped?: number;
   hasMore?: boolean;
   continuation?: string;
+  importPreview?: {
+    fileName: string;
+    fileSize: number;
+    sourceRows: number;
+    orders: number;
+    lineItems: number;
+    duplicates: number;
+    newOrders: number;
+    matchedNewOrders: number;
+    unmatchedNewOrders: number;
+  };
+  importStats?: {
+    importedOrders: number;
+    duplicateOrders: number;
+    linkedExistingOrders: number;
+    unmatchedOrders: number;
+    importedLineItems: number;
+  };
 };
 type ShopifyCustomerNode = {
   id: string;
@@ -94,6 +113,140 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const data = await request.formData();
   const intent = field(data, "intent");
+  if (intent === "preview-csv" || intent === "import-csv") {
+    const file = data.get("csvFile");
+    if (!(file instanceof File) || !file.name.toLowerCase().endsWith(".csv")) {
+      return json({ error: "Choose a Shopify orders export CSV file." }, 400);
+    }
+    if (file.size <= 0 || file.size > 10 * 1024 * 1024) {
+      return json({ error: "CSV file must be between 1 byte and 10 MB." }, 400);
+    }
+
+    let parsed;
+    try {
+      parsed = parseShopifyOrderCsv(await file.text());
+    } catch (error) {
+      return json({
+        error: error instanceof Error ? error.message : "The Shopify CSV could not be parsed.",
+      }, 400);
+    }
+
+    const customers = await prisma.shopifyCustomerMirror.findMany({
+      where: { shop: session.shop },
+      select: { id: true, email: true, phone: true },
+    });
+    const emailIndex = new Map<string, Set<string>>();
+    const phoneIndex = new Map<string, Set<string>>();
+    const addIndex = (index: Map<string, Set<string>>, key: string | null, id: string) => {
+      if (!key) return;
+      const ids = index.get(key) ?? new Set<string>();
+      ids.add(id);
+      index.set(key, ids);
+    };
+    for (const customer of customers) {
+      const email = customer.email?.trim().toLowerCase() || null;
+      const rawPhone = customer.phone?.trim() ?? "";
+      const phone = rawPhone.startsWith("+") ? normalizeE164Phone(rawPhone) : null;
+      addIndex(emailIndex, email, customer.id);
+      addIndex(phoneIndex, phone, customer.id);
+    }
+    const uniqueId = (ids?: Set<string>) => ids?.size === 1 ? [...ids][0] : null;
+    const matchedCustomerIds = new Map<string, string>();
+    for (const order of parsed.orders) {
+      const email = order.customerEmail?.trim().toLowerCase() || null;
+      const rawPhone = order.customerPhone?.trim() ?? "";
+      const phone = rawPhone.startsWith("+") ? normalizeE164Phone(rawPhone) : null;
+      const emailIds = email ? emailIndex.get(email) : undefined;
+      const phoneIds = phone ? phoneIndex.get(phone) : undefined;
+      const emailId = uniqueId(emailIds);
+      const phoneId = uniqueId(phoneIds);
+      let customerId: string | null = null;
+      if (emailId && phoneId) {
+        customerId = emailId === phoneId ? emailId : null;
+      } else if (emailId && (!phoneIds || phoneIds.has(emailId))) {
+        customerId = emailId;
+      } else if (phoneId && (!emailIds || emailIds.has(phoneId))) {
+        customerId = phoneId;
+      }
+      if (customerId) matchedCustomerIds.set(order.id, customerId);
+    }
+
+    const existing = await prisma.shopifyOrderMirror.findMany({
+      where: { shop: session.shop, id: { in: parsed.orders.map((order) => order.id) } },
+      select: { id: true, customerId: true },
+    });
+    const existingById = new Map(existing.map((order) => [order.id, order]));
+    const newOrders = parsed.orders.filter((order) => !existingById.has(order.id));
+    const matchedNewOrders = newOrders.filter((order) => matchedCustomerIds.has(order.id)).length;
+    const unmatchedNewOrders = newOrders.length - matchedNewOrders;
+
+    if (intent === "preview-csv") {
+      return json({
+        importPreview: {
+          fileName: file.name,
+          fileSize: file.size,
+          sourceRows: parsed.sourceRows,
+          orders: parsed.orders.length,
+          lineItems: parsed.lineItems,
+          duplicates: existing.length,
+          newOrders: newOrders.length,
+          matchedNewOrders,
+          unmatchedNewOrders,
+        },
+      });
+    }
+
+    const importedAt = new Date();
+    const writes = newOrders.map((order) => {
+      const customerId = matchedCustomerIds.get(order.id) ?? null;
+      const fields = {
+        shop: session.shop,
+        customerId,
+        customerEmail: order.customerEmail,
+        customerPhone: order.customerPhone,
+        customerName: order.customerName,
+        csvImportedAt: importedAt,
+        orderName: order.orderName,
+        orderNumber: order.orderNumber,
+        processedAt: order.processedAt,
+        createdAtShopify: order.createdAtShopify,
+        totalPrice: order.totalPrice,
+        currencyCode: order.currencyCode,
+        financialStatus: order.financialStatus,
+        fulfillmentStatus: order.fulfillmentStatus,
+        lineItemsJson: JSON.stringify(order.lineItems),
+        syncedAt: importedAt,
+      };
+      return prisma.shopifyOrderMirror.upsert({
+        where: { id: order.id },
+        create: { id: order.id, ...fields },
+        update: {},
+      });
+    });
+    const linksToResolve = existing.flatMap((order) => {
+      const customerId = matchedCustomerIds.get(order.id);
+      return !order.customerId && customerId
+        ? [prisma.shopifyOrderMirror.updateMany({
+            where: { id: order.id, shop: session.shop, customerId: null },
+            data: { customerId, csvImportedAt: importedAt },
+          })]
+        : [];
+    });
+    if (writes.length || linksToResolve.length) {
+      await prisma.$transaction([...writes, ...linksToResolve]);
+    }
+    return json({
+      success: `Historical import finished: ${newOrders.length.toLocaleString("en-IN")} new orders imported; ${existing.length.toLocaleString("en-IN")} already existed and were kept; ${unmatchedNewOrders.toLocaleString("en-IN")} new orders need customer matching.`,
+      importStats: {
+        importedOrders: newOrders.length,
+        duplicateOrders: existing.length,
+        linkedExistingOrders: linksToResolve.length,
+        unmatchedOrders: unmatchedNewOrders,
+        importedLineItems: newOrders.reduce((total, order) => total + order.lineItems.length, 0),
+      },
+    });
+  }
+
   if (intent === "sync" || intent === "sync-next") {
     const shop = session.shop;
     let job = await prisma.shopifySyncJob.findUnique({ where: { id: shop } });
@@ -463,6 +616,8 @@ export default function CampaignCenter() {
   const syncFetcher = useFetcher<CampaignActionData>();
   const autoSyncContinuation = useRef<string | null>(null);
   const consentFetcher = useFetcher<CampaignActionData>();
+  const importFetcher = useFetcher<CampaignActionData>();
+  const [csvFileKey, setCsvFileKey] = useState("");
   const [query,setQuery] = useState(data.search);
   const [selected,setSelected] = useState<string[]>([]);
   const [selectAllMatching,setSelectAllMatching] = useState(false);
@@ -497,6 +652,25 @@ export default function CampaignCenter() {
       <span>{data.customerCount.toLocaleString("en-IN")} local customers · {data.orderCount.toLocaleString("en-IN")} local orders</span>
     </syncFetcher.Form>
     <p style={{fontSize:13,color:"#667085",marginTop:0}}>Sync runs in resumable 100-record Shopify pages. Keep this page open while it processes; after interruption, press Resume. Shopify exposes only the default recent 60-day order window unless the app receives read_all_orders approval.</p>
+    <div style={{padding:14,border:"1px solid #d0d5dd",borderRadius:8,margin:"16px 0",background:"white"}}>
+      <h2 style={{marginTop:0}}>Import historical Shopify orders</h2>
+      <p style={{fontSize:13,color:"#667085"}}>Upload the Shopify Orders CSV export. Bowchika Connect groups line items by Shopify order ID, matches customers by unique email/phone, and keeps existing API orders instead of duplicating or overwriting them. Unmatched orders are still stored, but remain unlinked until they can be matched.</p>
+      <importFetcher.Form method="post" encType="multipart/form-data" style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+        <input type="file" name="csvFile" accept=".csv,text/csv" required onChange={event=>{const selectedFile=event.currentTarget.files?.[0];setCsvFileKey(selectedFile?selectedFile.name+":"+selectedFile.size:"");}}/>
+        <button type="submit" name="intent" value="preview-csv" style={style} disabled={importFetcher.state!=="idle"}>Preview CSV</button>
+        {importFetcher.data?.importPreview && (importFetcher.data.importPreview.fileName+":"+importFetcher.data.importPreview.fileSize)===csvFileKey && <button type="submit" name="intent" value="import-csv" style={{...style,background:"#155eef",color:"white"}} disabled={importFetcher.state!=="idle" || importFetcher.data.importPreview.newOrders===0}>Confirm import {importFetcher.data.importPreview.newOrders.toLocaleString("en-IN")} new orders</button>}
+      </importFetcher.Form>
+      {importFetcher.data?.importPreview && (importFetcher.data.importPreview.fileName+":"+importFetcher.data.importPreview.fileSize)===csvFileKey && <div role="status" style={{marginTop:12,padding:12,background:"#f2f4f7",borderRadius:8}}>
+        <strong>Import preview</strong>
+        <p style={{margin:"6px 0"}}>{importFetcher.data.importPreview.orders.toLocaleString("en-IN")} unique orders · {importFetcher.data.importPreview.lineItems.toLocaleString("en-IN")} line items · {importFetcher.data.importPreview.sourceRows.toLocaleString("en-IN")} CSV rows</p>
+        <p style={{margin:"6px 0"}}>{importFetcher.data.importPreview.duplicates.toLocaleString("en-IN")} already in Bowchika Connect · {importFetcher.data.importPreview.newOrders.toLocaleString("en-IN")} new orders</p>
+        <p style={{margin:"6px 0"}}>{importFetcher.data.importPreview.matchedNewOrders.toLocaleString("en-IN")} new orders matched to a Shopify customer · {importFetcher.data.importPreview.unmatchedNewOrders.toLocaleString("en-IN")} will be stored without a customer link for later reconciliation</p>
+      </div>}
+      {importFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{importFetcher.data.error}</p>}
+      {importFetcher.data?.success && <p role="status">{importFetcher.data.success}</p>}
+      {importFetcher.data?.importStats && <p style={{fontSize:13,color:"#667085"}}>Imported line items: {importFetcher.data.importStats.importedLineItems.toLocaleString("en-IN")} · Existing orders linked: {importFetcher.data.importStats.linkedExistingOrders.toLocaleString("en-IN")} · Unmatched new orders: {importFetcher.data.importStats.unmatchedOrders.toLocaleString("en-IN")}</p>}
+    </div>
+
     {(syncFetcher.data?.message || data.syncJob) && <p role="status">{syncFetcher.data?.message || ("Last sync: " + data.syncJob?.status + " · " + (data.syncJob?.customersProcessed ?? 0).toLocaleString("en-IN") + " customers · " + (data.syncJob?.ordersProcessed ?? 0).toLocaleString("en-IN") + " orders")}</p>}
     {syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{syncFetcher.data.error}</p>}
     {data.syncJob?.lastError && !syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{data.syncJob.lastError}</p>}{typeof fetcher.data?.success === "string" && <p role="status">{fetcher.data.success}</p>}{fetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{fetcher.data.error}</p>}{typeof consentFetcher.data?.success === "string" && <p role="status">{consentFetcher.data.success}</p>}{consentFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{consentFetcher.data.error}</p>}
