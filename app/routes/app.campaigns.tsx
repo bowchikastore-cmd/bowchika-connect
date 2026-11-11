@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
+import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { normalizeE164Phone, getWhatsAppTemplateRequirements } from "../whatsapp-shared";
@@ -901,6 +902,8 @@ export default function CampaignCenter() {
   const syncFetcher = useFetcher<CampaignActionData>();
   const autoSyncContinuation = useRef<string | null>(null);
   const importFetcher = useFetcher<CampaignActionData>();
+  const imageFetcher = useFetcher<CampaignActionData>();
+  const shopify = useAppBridge() as unknown as { intents: { invoke: (intent: string, options?: unknown) => Promise<{ complete: Promise<{ code: string; data?: { ids?: string[] }; message?: string }> }> } };
   const [csvFileKey, setCsvFileKey] = useState("");
   const [query,setQuery] = useState(data.search);
   const [selected,setSelected] = useState<string[]>([]);
@@ -910,6 +913,127 @@ export default function CampaignCenter() {
   const [name,setName] = useState("Bowchika customer campaign");
   const [scheduledAt,setScheduledAt] = useState("");
   const [mediaUrl,setMediaUrl] = useState("");
+  const [imageAlt,setImageAlt] = useState("");
+  const [imagePickerBusy,setImagePickerBusy] = useState(false);
+  const [imagePickerError,setImagePickerError] = useState("");
+  const [minOrders,setMinOrders] = useState(data.filters.minOrders === null ? "" : String(data.filters.minOrders));
+  const [maxOrders,setMaxOrders] = useState(data.filters.maxOrders === null ? "" : String(data.filters.maxOrders));
+  const [minSpend,setMinSpend] = useState(data.filters.minSpend === null ? "" : String(data.filters.minSpend));
+  const [lastOrderDays,setLastOrderDays] = useState(data.filters.lastOrderDays === null ? "" : String(data.filters.lastOrderDays));
+  const [productQuery,setProductQuery] = useState(data.filters.productQuery);
+  const [collectionQuery,setCollectionQuery] = useState(data.filters.collectionQuery);
+  const [variableMapping,setVariableMapping] = useState<Record<string,string>>({});
+  const [customMapping,setCustomMapping] = useState<Record<string,string>>({});
+
+  useEffect(() => {
+    if (imageFetcher.state === "idle" && imageFetcher.data?.mediaUrl) {
+      setMediaUrl(imageFetcher.data.mediaUrl);
+      setImageAlt(String(imageFetcher.data.mediaAlt ?? ""));
+      setImagePickerError("");
+    } else if (imageFetcher.state === "idle" && imageFetcher.data?.error) {
+      setImagePickerError(imageFetcher.data.error);
+    }
+  }, [imageFetcher.state, imageFetcher.data]);
+
+  useEffect(() => {
+    if (!template) return;
+    setVariableMapping({});
+    setCustomMapping({});
+  }, [chosenTemplate]);
+
+  const pickShopifyImage = async () => {
+    setImagePickerBusy(true);
+    setImagePickerError("");
+    try {
+      const activity = await shopify.intents.invoke("pick:shopify/File", {
+        data: { mediaTypes: ["MediaImage"], multiSelect: false },
+      });
+      const response = await activity.complete;
+      if (response.code === "ok") {
+        const fileId = response.data?.ids?.[0];
+        if (!fileId) {
+          setImagePickerError("No image was selected.");
+        } else {
+          imageFetcher.submit(
+            { intent: "resolve-image-file", fileId },
+            { method: "post" },
+          );
+        }
+      } else if (response.code === "error") {
+        setImagePickerError(response.message || "Shopify could not open the Files picker.");
+      }
+    } catch {
+      setImagePickerError("Shopify Files picker is unavailable in this session. Paste a public HTTPS image URL instead.");
+    } finally {
+      setImagePickerBusy(false);
+    }
+  };
+
+  const reuseCampaign = (campaign: (typeof data.campaigns)[number]) => {
+    try {
+      const criteria = JSON.parse(campaign.audienceCriteriaJson || "{}") as {
+        search?: string; orderedOnly?: boolean; minOrders?: number | null; maxOrders?: number | null;
+        minSpend?: number | null; lastOrderDays?: number | null; productQuery?: string;
+        collectionQuery?: string; selectAllMatching?: boolean; selectedCustomerIds?: string[];
+      };
+      const savedMapping = JSON.parse(campaign.variableMappingJson || "{}") as Record<string,string>;
+      const nextCustom: Record<string,string> = {};
+      const nextMapping: Record<string,string> = {};
+      for (const [key,value] of Object.entries(savedMapping)) {
+        if (key.startsWith("custom.")) nextCustom[key.slice(7)] = value;
+        else nextMapping[key] = value;
+      }
+      setName(campaign.name + " (Copy)");
+      setChosenTemplate(campaign.templateId);
+      setVariableMapping(nextMapping);
+      setCustomMapping(nextCustom);
+      setScheduledAt("");
+      setMediaUrl(campaign.mediaUrl || "");
+      setQuery(criteria.search || "");
+      setOrderedOnly(criteria.orderedOnly !== false);
+      setMinOrders(criteria.minOrders == null ? "" : String(criteria.minOrders));
+      setMaxOrders(criteria.maxOrders == null ? "" : String(criteria.maxOrders));
+      setMinSpend(criteria.minSpend == null ? "" : String(criteria.minSpend));
+      setLastOrderDays(criteria.lastOrderDays == null ? "" : String(criteria.lastOrderDays));
+      setProductQuery(criteria.productQuery || "");
+      setCollectionQuery(criteria.collectionQuery || "");
+      setSelectAllMatching(Boolean(criteria.selectAllMatching));
+      setSelected(criteria.selectedCustomerIds || []);
+      setImageAlt("");
+    } catch {
+      setImagePickerError("This campaign's saved audience settings could not be reopened. Start a new audience instead.");
+    }
+  };
+
+  const sampleCustomer = {
+    firstName: "Alex",
+    lastName: "Morgan",
+    name: "Alex Morgan",
+    email: "alex@example.com",
+    phone: "+91 98765 43210",
+    numberOfOrders: "3",
+    amountSpent: "₹4,299",
+    "latestOrder.orderName": "#1538",
+    "latestOrder.totalPrice": "₹949",
+    "latestOrder.productName": "Raze – Blast Artist T-Shirt",
+  };
+  const previewValue = (section: string, key: string) => {
+    const path = variableMapping[section + "." + key] || "name";
+    if (path === "custom") return customMapping[section + "." + key] || "[Custom text]";
+    return sampleCustomer[path as keyof typeof sampleCustomer] ?? "[Sample value]";
+  };
+  const previewText = (text: string, section: string) => text.replace(
+    /\\{\\{\\s*([A-Za-z0-9_]+)\\s*\\}\\}/g,
+    (_match, key: string) => previewValue(section, key),
+  );
+  const currentPreviewComponents = requirements ? (() => {
+    try { return JSON.parse(template?.components || "[]") as Array<{type?:string;text?:string;format?:string}>; }
+    catch { return []; }
+  })() : [];
+  const previewHeader = requirements?.header?.format === "TEXT"
+    ? previewText(requirements.header.text, "header")
+    : "";
+  const previewBody = requirements ? previewText(requirements.bodyText, "body") : "";
   useEffect(() => {
     const result = syncFetcher.data;
     if (syncFetcher.state !== "idle" || !result?.hasMore || !result.syncJobId || !result.continuation) return;
@@ -925,6 +1049,19 @@ export default function CampaignCenter() {
   const requirements = useMemo(()=>{try{return template?getWhatsAppTemplateRequirements(template.components):null}catch{return null}},[template]);
   const fields = [{label:"Customer first name",value:"firstName"},{label:"Customer full name",value:"name"},{label:"Customer email",value:"email"},{label:"Customer phone",value:"phone"},{label:"Latest order number",value:"latestOrder.orderName"},{label:"Latest order total",value:"latestOrder.totalPrice"},{label:"Product name (latest order)",value:"latestOrder.productName"},{label:"Order count",value:"numberOfOrders"},{label:"Total spend",value:"amountSpent"},{label:"Custom text",value:"custom"}];
   const style = {padding:10,border:"1px solid #d0d5dd",borderRadius:8,background:"white",color:"#222"} as const;
+  const inputStyle = { ...style, width: "100%", boxSizing: "border-box" as const };
+  const nextPageParams = new URLSearchParams({
+    q: data.filters.search,
+    ordered: String(data.filters.orderedOnly),
+    minOrders: minOrders,
+    maxOrders: maxOrders,
+    minSpend: minSpend,
+    lastOrderDays: lastOrderDays,
+    productQuery: productQuery,
+    collectionQuery: collectionQuery,
+  });
+  if (data.nextCursor) nextPageParams.set("cursor", data.nextCursor);
+
   return <s-page heading="Customer & Campaign Center"><div style={{maxWidth:1400,margin:"0 auto",padding:20,color:"var(--bc-text, #222)"}}>
     <h1>Shopify customers → WhatsApp campaigns</h1>
     <p>Synced customer and order records, full-store search, bulk selection, approved template mapping and scheduled campaign drafts.</p>
@@ -960,23 +1097,65 @@ export default function CampaignCenter() {
     {(syncFetcher.data?.message || data.syncJob) && <p role="status">{syncFetcher.data?.message || ("Last sync: " + data.syncJob?.status + " · " + (data.syncJob?.customersProcessed ?? 0).toLocaleString("en-IN") + " customers · " + (data.syncJob?.ordersProcessed ?? 0).toLocaleString("en-IN") + " orders")}</p>}
     {syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{syncFetcher.data.error}</p>}
     {data.syncJob?.lastError && !syncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{data.syncJob.lastError}</p>}{typeof fetcher.data?.success === "string" && <p role="status">{fetcher.data.success}</p>}{fetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{fetcher.data.error}</p>}
-    <form method="get" style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}><input name="q" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search name, email, phone, order ID" style={{...style,flex:1,minWidth:220}}/><label style={{display:"flex",gap:6,alignItems:"center"}}><input type="checkbox" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label><input type="hidden" name="ordered" value={String(orderedOnly)}/><button style={style}>Search</button></form>
+    <form method="get" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10,marginBottom:16,padding:14,border:"1px solid #d0d5dd",borderRadius:8,background:"white"}}>
+      <label style={{gridColumn:"1 / -1"}}>Search customers<input name="q" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Name, email, phone or order number" style={{...inputStyle,marginTop:6}}/></label>
+      <label>Minimum orders<input name="minOrders" type="number" min="0" value={minOrders} onChange={e=>setMinOrders(e.target.value)} placeholder="e.g. 2" style={{...inputStyle,marginTop:6}}/></label>
+      <label>Maximum orders<input name="maxOrders" type="number" min="0" value={maxOrders} onChange={e=>setMaxOrders(e.target.value)} placeholder="Any" style={{...inputStyle,marginTop:6}}/></label>
+      <label>Minimum lifetime spend<input name="minSpend" type="number" min="0" value={minSpend} onChange={e=>setMinSpend(e.target.value)} placeholder="Amount in INR" style={{...inputStyle,marginTop:6}}/></label>
+      <label>Last order<input name="lastOrderDays" value={lastOrderDays} onChange={e=>setLastOrderDays(e.target.value)} style={{...inputStyle,marginTop:6}} as="select">
+        <option value="">Any time</option><option value="30">Last 30 days</option><option value="60">Last 60 days</option><option value="90">Last 90 days</option><option value="180">Last 180 days</option><option value="365">Last 365 days</option>
+      </label>
+      <label>Purchased product<input name="productQuery" value={productQuery} onChange={e=>setProductQuery(e.target.value)} placeholder="Product title or Shopify product ID" style={{...inputStyle,marginTop:6}}/></label>
+      <label>Purchased collection<input name="collectionQuery" value={collectionQuery} onChange={e=>setCollectionQuery(e.target.value)} placeholder="e.g. Valorant Armory" style={{...inputStyle,marginTop:6}}/></label>
+      <label style={{display:"flex",gap:8,alignItems:"center"}}><input type="checkbox" name="ordered" value="true" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label>
+      <input type="hidden" name="ordered" value={String(orderedOnly)}/>
+      <div style={{display:"flex",gap:8,alignItems:"end"}}><button type="submit" style={{...style,background:"#155eef",color:"white"}}>Apply filters</button><a href="/app/campaigns" style={{...style,textDecoration:"none"}}>Clear filters</a></div>
+      <div style={{gridColumn:"1 / -1",fontSize:12,color:"#667085"}}>Product and collection filters use synced Shopify line-item IDs, titles and collections. Orders available through Shopify's standard access or the historic CSV data are included where their line-item details support the selected filter.</div>
+    </form>
     <fetcher.Form method="post" onSubmit={e=>{if(!window.confirm("Save a campaign for the selected audience? Only recipients with verified WhatsApp opt-in are eligible.")){e.preventDefault();return;}}}>
-      <input type="hidden" name="intent" value="create-campaign"/><input type="hidden" name="selectAllMatching" value={String(selectAllMatching)}/><input type="hidden" name="audienceSearch" value={query}/><input type="hidden" name="orderedOnly" value={String(orderedOnly)}/>{selected.map(id=><input key={id} type="hidden" name="customerId" value={id}/>)}
-      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}><button type="button" style={style} onClick={()=>{setSelected(data.customers.map(c=>c.id));setSelectAllMatching(true)}}>Select all matching ({data.customerCount})</button><button type="button" style={style} onClick={()=>{setSelected([]);setSelectAllMatching(false)}}>Clear selection</button><strong>{selected.length} selected</strong></div>
-      {data.nextCursor && <div style={{display:"flex",justifyContent:"flex-end",marginBottom:10}}><a href={`?q=${encodeURIComponent(data.search)}&ordered=${String(data.orderedOnly)}&cursor=${encodeURIComponent(data.nextCursor)}`} style={{...style,textDecoration:"none"}}>Next 50 customers →</a></div>}
+      <input type="hidden" name="intent" value="create-campaign"/><input type="hidden" name="selectAllMatching" value={String(selectAllMatching)}/><input type="hidden" name="audienceSearch" value={query}/><input type="hidden" name="orderedOnly" value={String(orderedOnly)}/>
+      <input type="hidden" name="minOrders" value={minOrders}/><input type="hidden" name="maxOrders" value={maxOrders}/><input type="hidden" name="minSpend" value={minSpend}/><input type="hidden" name="lastOrderDays" value={lastOrderDays}/><input type="hidden" name="productQuery" value={productQuery}/><input type="hidden" name="collectionQuery" value={collectionQuery}/>
+      {selected.map(id=><input key={id} type="hidden" name="customerId" value={id}/>)}
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}><button type="button" style={style} onClick={()=>{setSelected(data.customers.map(c=>c.id));setSelectAllMatching(true)}}>Select all matching ({data.customerCount} customers)</button><span style={{fontSize:13,color:"#667085"}}>{data.eligibleCount} with Shopify WhatsApp opt-in</span><button type="button" style={style} onClick={()=>{setSelected([]);setSelectAllMatching(false)}}>Clear selection</button><strong>{selected.length} selected</strong></div>
+      {data.nextCursor && <div style={{display:"flex",justifyContent:"flex-end",marginBottom:10}}><a href={`?${nextPageParams.toString()}`} style={{...style,textDecoration:"none"}}>Next 50 customers →</a></div>}
       <div style={{overflowX:"auto",border:"1px solid #d0d5dd",borderRadius:8,marginBottom:20}}><table style={{borderCollapse:"collapse",width:"100%",minWidth:900}}><thead><tr>{["Select","Customer","Email","Phone","Orders","Latest order","WhatsApp consent"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.customers.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}><input type="checkbox" checked={selected.includes(c.id)} onChange={e=>{setSelectAllMatching(false);setSelected(old=>e.target.checked?[...new Set([...old,c.id])]:old.filter(id=>id!==c.id))}}/></td><td style={{padding:10}}>{[c.firstName,c.lastName].filter(Boolean).join(" ")||"Unnamed"}</td><td style={{padding:10}}>{c.email||"—"}</td><td style={{padding:10}}>{c.phone||"—"}</td><td style={{padding:10}}>{c.numberOfOrders}</td><td style={{padding:10}}>{c.latestOrder?.orderName||"—"}</td><td style={{padding:10}}><strong>{c.whatsappOptOutAt ? "Suppressed" : c.whatsappConsentState}</strong><div style={{fontSize:12,color:"#667085"}}>{c.whatsappConsentUpdatedAt ? new Date(c.whatsappConsentUpdatedAt).toLocaleDateString("en-IN") : "No Shopify consent record"}</div></td></tr>)}</tbody></table></div>
       <h2>Create campaign</h2><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
       <label>Campaign name<input name="name" value={name} onChange={e=>setName(e.target.value)} style={{...style,width:"100%",marginTop:6}}/></label>
       <label>Approved template<select name="templateId" value={chosenTemplate} onChange={e=>setChosenTemplate(e.target.value)} style={{...style,width:"100%",marginTop:6}}>{data.templates.map(t=><option key={t.id} value={t.id}>{t.name} · {t.language}</option>)}</select></label>
       <label>Schedule (blank = queue now)<input type="datetime-local" name="scheduledAt" value={scheduledAt} onChange={e=>setScheduledAt(e.target.value)} style={{...style,width:"100%",marginTop:6}}/></label>
-      {requirements?.header?.format==="IMAGE"&&<label>Header image HTTPS URL<input name="mediaUrl" value={mediaUrl} onChange={e=>setMediaUrl(e.target.value)} placeholder="https://..." style={{...style,width:"100%",marginTop:6}}/></label>}
+      {requirements?.header?.format==="IMAGE"&&<div style={{display:"grid",gap:8}}>
+        <label>Image header<input name="mediaUrl" value={mediaUrl} onChange={e=>setMediaUrl(e.target.value)} placeholder="Paste a public HTTPS image URL" style={{...inputStyle,marginTop:6}}/></label>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}><button type="button" style={style} onClick={pickShopifyImage} disabled={imagePickerBusy || imageFetcher.state!=="idle"}>{imagePickerBusy || imageFetcher.state!=="idle" ? "Opening Shopify Files…" : "Choose from Shopify Files"}</button><small style={{color:"#667085"}}>Uses your store's native Files picker</small></div>
+        {imagePickerError && <p role="alert" style={{color:"#b42318",margin:0}}>{imagePickerError}</p>}
+      </div>}
       </div>
       {requirements?.unsupported&&<p style={{color:"#b42318"}}>Current sender does not support this template: {requirements.unsupported}</p>}
-      {requirements&&<div style={{marginTop:16,padding:14,border:"1px solid #d0d5dd",borderRadius:8}}><h3>Choose what each variable means</h3>{[...(requirements.header?.format==="TEXT"?requirements.header.variables:[]).map(v=>({section:"header",key:v.key,label:"Header "+v.label})),...requirements.bodyVariables.map(v=>({section:"body",key:v.key,label:"Body "+v.label})),...requirements.buttons.flatMap(b=>b.variables.map(v=>({section:"button"+b.index,key:v.key,label:b.label+" "+v.label})))].map(v=><div key={v.section+v.key} style={{display:"grid",gridTemplateColumns:"180px 1fr 1fr",gap:8,alignItems:"center",margin:"8px 0"}}><span>{v.label}</span><select name={"map_"+v.section+"."+v.key} style={style}><option value="name">Customer full name</option>{fields.map(f=><option key={f.value} value={f.value}>{f.label}</option>)}</select><input name={"custom_"+v.section+"."+v.key} placeholder="Custom text (if selected)" style={style}/></div>)}<p style={{color:"#667085",fontSize:13}}>Variable mapping is saved with the campaign. Shopify media picker and actual per-recipient preview are follow-up integration work.</p></div>}
+      {requirements&&<div style={{marginTop:16,padding:14,border:"1px solid #d0d5dd",borderRadius:8}}>
+        <h3>Choose what each variable means</h3>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:12}}>
+          <div>{[...(requirements.header?.format==="TEXT"?requirements.header.variables:[]).map(v=>({section:"header",key:v.key,label:"Header "+v.label})),...requirements.bodyVariables.map(v=>({section:"body",key:v.key,label:"Body "+v.label})),...requirements.buttons.flatMap(b=>b.variables.map(v=>({section:"button"+b.index,key:v.key,label:b.label+" "+v.label})))].map(v=><div key={v.section+v.key} style={{display:"grid",gridTemplateColumns:"110px 1fr",gap:8,alignItems:"center",margin:"8px 0"}}>
+            <span>{v.label}</span><div style={{display:"grid",gap:5}}>
+              <select name={"map_"+v.section+"."+v.key} value={variableMapping[v.section+"."+v.key] || "name"} onChange={e=>setVariableMapping(old=>({...old,[v.section+"."+v.key]:e.target.value}))} style={inputStyle}>
+                <option value="name">Customer full name</option>{fields.map(f=><option key={f.value} value={f.value}>{f.label}</option>)}
+              </select>
+              <input name={"custom_"+v.section+"."+v.key} value={customMapping[v.section+"."+v.key] || ""} onChange={e=>setCustomMapping(old=>({...old,[v.section+"."+v.key]:e.target.value}))} placeholder="Custom text if selected" style={inputStyle}/>
+            </div></div>)}</div>
+          <aside style={{border:"1px solid #d0d5dd",borderRadius:12,background:"#f2f4f7",padding:12,alignSelf:"start",position:"sticky",top:16}}>
+            <strong>WhatsApp message preview</strong>
+            <div style={{marginTop:12,background:"white",borderRadius:12,padding:12,boxShadow:"0 1px 3px #00000012",minHeight:150}}>
+              {requirements.header?.format==="IMAGE" && (mediaUrl ? <img src={mediaUrl} alt={imageAlt || "WhatsApp template header"} style={{width:"100%",borderRadius:8,marginBottom:8,maxHeight:180,objectFit:"cover"}}/> : <div style={{background:"#e5e7eb",padding:28,borderRadius:8,textAlign:"center",color:"#667085",marginBottom:8}}>Image header preview</div>)}
+              {previewHeader && <strong style={{display:"block",marginBottom:8}}>{previewHeader}</strong>}
+              <p style={{whiteSpace:"pre-wrap",margin:"0 0 8px"}}>{previewBody || "Your approved template body will appear here."}</p>
+              {requirements.footerText && <small style={{color:"#667085"}}>{requirements.footerText}</small>}
+              {requirements.previewButtons.length>0 && <div style={{borderTop:"1px solid #eaecf0",marginTop:10,paddingTop:8,display:"grid",gap:6}}>{requirements.previewButtons.map((button,i)=><div key={i} style={{color:"#1677c8",textAlign:"center",fontWeight:600,fontSize:13}}>{button.label}</div>)}</div>}
+            </div>
+            <p style={{fontSize:12,color:"#667085",marginBottom:0}}>Preview uses sample customer data. Actual recipients receive their own mapped Shopify fields.</p>
+          </aside>
+        </div>
+      </div>}
       <button style={{...style,marginTop:16,background:"#155eef",color:"white"}} disabled={(!selectAllMatching&&!selected.length)||!template||Boolean(requirements?.unsupported)||fetcher.state!=="idle"}>Save / schedule campaign</button>
     </fetcher.Form>
-    <h2 style={{marginTop:32}}>Campaign delivery log</h2><div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse"}}><thead><tr>{["Campaign","Status","Audience","Schedule","Recipient states"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.campaigns.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}>{c.name}<div style={{fontSize:12,color:"#667085"}}>{c.templateName}</div></td><td style={{padding:10}}>{c.status}</td><td style={{padding:10}}>{c.audienceCount}</td><td style={{padding:10}}>{c.scheduledAt?new Date(c.scheduledAt).toLocaleString():"Immediate"}</td><td style={{padding:10}}>{Object.entries(c.counts).map(([k,v])=>k+": "+v).join(" · ")}</td></tr>)}</tbody></table></div>
+    <h2 style={{marginTop:32}}>Campaign delivery log</h2><div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse"}}><thead><tr>{["Campaign","Status","Audience","Schedule","Recipient states"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.campaigns.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}>{c.name}<div style={{fontSize:12,color:"#667085"}}>{c.templateName}</div></td><td style={{padding:10}}>{c.status}</td><td style={{padding:10}}>{c.audienceCount}</td><td style={{padding:10}}>{c.scheduledAt?new Date(c.scheduledAt).toLocaleString():"Immediate"}</td><td style={{padding:10}}>{Object.entries(c.counts).map(([k,v])=>k+": "+v).join(" · ")}<div style={{marginTop:6}}><button type="button" style={style} onClick={()=>reuseCampaign(c)}>Duplicate & reuse</button></div></td></tr>)}</tbody></table></div>
     <p style={{fontSize:12,color:"#667085",marginTop:20}}>Campaigns are persisted, but delivery is not enabled until the background worker is deployed and verified.</p>
   </div></s-page>;
 }
