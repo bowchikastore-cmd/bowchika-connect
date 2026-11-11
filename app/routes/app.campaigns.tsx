@@ -107,7 +107,7 @@ const incrementalOrderQuery = `#graphql
 query BowchikaIncrementalOrders($after: String, $query: String) {
   orders(first: 100, after: $after, query: $query, sortKey: UPDATED_AT) {
     pageInfo { hasNextPage endCursor }
-    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber } } billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
+    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName updatedAt tags numberOfOrders amountSpent { amount currencyCode } defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber } } email phone billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
   }
 }`;
 
