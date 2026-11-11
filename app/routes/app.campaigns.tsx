@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { normalizeE164Phone, getWhatsAppTemplateRequirements } from "../whatsapp-shared";
@@ -86,7 +87,19 @@ type ShopifyOrderNode = {
   phone: string | null;
   billingAddress?: { phone: string | null; name: string | null } | null;
   totalPriceSet?: { shopMoney?: { amount: string; currencyCode: string } | null } | null;
-  lineItems?: { nodes?: Array<{ name: string; quantity: number; sku: string | null; variantTitle: string | null }> | null } | null;
+  lineItems?: { nodes?: Array<{
+    name: string;
+    quantity: number;
+    sku: string | null;
+    variantTitle: string | null;
+    product?: {
+      id: string;
+      title: string;
+      productType: string;
+      collections?: { nodes?: Array<{ id: string; title: string }> | null } | null;
+    } | null;
+    variant?: { id: string; title: string } | null;
+  }> | null } | null;
 };
 const customerQuery = `#graphql
 query BowchikaCustomerMirror($after: String) {
@@ -99,7 +112,7 @@ const orderQuery = `#graphql
 query BowchikaOrderMirror($after: String) {
   orders(first: 100, after: $after, sortKey: CREATED_AT, reverse: true) {
     pageInfo { hasNextPage endCursor }
-    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName updatedAt tags numberOfOrders amountSpent { amount currencyCode } defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber whatsAppMarketingConsent { state updatedAt collectedFrom optInLevel } } } email phone billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
+    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName updatedAt tags numberOfOrders amountSpent { amount currencyCode } defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber whatsAppMarketingConsent { state updatedAt collectedFrom optInLevel } } } email phone billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle product { id title productType collections(first: 20) { nodes { id title } } } variant { id title } } } }
   }
 }`;
 
@@ -115,7 +128,7 @@ const incrementalOrderQuery = `#graphql
 query BowchikaIncrementalOrders($after: String, $query: String) {
   orders(first: 100, after: $after, query: $query, sortKey: UPDATED_AT) {
     pageInfo { hasNextPage endCursor }
-    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName updatedAt tags numberOfOrders amountSpent { amount currencyCode } defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber whatsAppMarketingConsent { state updatedAt collectedFrom optInLevel } } } email phone billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle } } }
+    nodes { id name number createdAt processedAt updatedAt displayFinancialStatus displayFulfillmentStatus customer { id firstName lastName updatedAt tags numberOfOrders amountSpent { amount currencyCode } defaultEmailAddress { emailAddress } defaultPhoneNumber { phoneNumber whatsAppMarketingConsent { state updatedAt collectedFrom optInLevel } } } email phone billingAddress { phone name } totalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 100) { nodes { name quantity sku variantTitle product { id title productType collections(first: 20) { nodes { id title } } } variant { id title } } } }
   }
 }`;
 
@@ -201,14 +214,71 @@ const syncShopifyCustomerMirrors = async (
   await prisma.$transaction(operations as never);
 };
 
+const buildAudienceWhere = (shop: string, filters: {
+  search: string;
+  orderedOnly: boolean;
+  minOrders: number | null;
+  maxOrders: number | null;
+  minSpend: number | null;
+  lastOrderDays: number | null;
+  productQuery: string;
+  collectionQuery: string;
+}) => {
+  const and: Record<string, unknown>[] = [];
+  if (filters.search) {
+    and.push({
+      OR: [
+        { firstName: { contains: filters.search } },
+        { lastName: { contains: filters.search } },
+        { email: { contains: filters.search } },
+        { phone: { contains: filters.search } },
+        { orders: { some: { orderName: { contains: filters.search } } } },
+      ],
+    });
+  }
+  if (filters.productQuery || filters.collectionQuery || filters.lastOrderDays !== null) {
+    const orderAnd: Record<string, unknown>[] = [];
+    if (filters.productQuery) orderAnd.push({ lineItemsJson: { contains: filters.productQuery } });
+    if (filters.collectionQuery) orderAnd.push({ lineItemsJson: { contains: filters.collectionQuery } });
+    if (filters.lastOrderDays !== null) {
+      orderAnd.push({ processedAt: { gte: new Date(Date.now() - filters.lastOrderDays * 86400000) } });
+    }
+    and.push({ orders: { some: { AND: orderAnd } } });
+  }
+  return {
+    shop,
+    ...(filters.orderedOnly ? { numberOfOrders: { gt: 0 } } : {}),
+    ...(filters.minOrders !== null || filters.maxOrders !== null
+      ? { numberOfOrders: { ...(filters.minOrders !== null ? { gte: filters.minOrders } : {}), ...(filters.maxOrders !== null ? { lte: filters.maxOrders } : {}) } }
+      : {}),
+    ...(filters.minSpend !== null ? { amountSpent: { gte: filters.minSpend } } : {}),
+    ...(and.length ? { AND: and } : {}),
+  };
+};
+
+const parseAudienceFilters = (read: (key: string) => string) => {
+  const positiveInteger = (raw: string) => raw && /^\\d+$/.test(raw) ? Number(raw) : null;
+  const nonNegativeAmount = (raw: string) => raw && Number.isFinite(Number(raw)) && Number(raw) >= 0 ? Number(raw) : null;
+  const days = positiveInteger(read("lastOrderDays"));
+  return {
+    search: read("q").slice(0, 120),
+    orderedOnly: read("orderedOnly") !== "false" && read("ordered") !== "false",
+    minOrders: positiveInteger(read("minOrders")),
+    maxOrders: positiveInteger(read("maxOrders")),
+    minSpend: nonNegativeAmount(read("minSpend")),
+    lastOrderDays: days !== null && [30, 60, 90, 180, 365].includes(days) ? days : null,
+    productQuery: read("productQuery").slice(0, 120),
+    collectionQuery: read("collectionQuery").slice(0, 120),
+  };
+};
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const url = new URL(request.url);
-  const search = (url.searchParams.get("q") ?? "").trim().slice(0, 120);
-  const orderedOnly = url.searchParams.get("ordered") !== "false";
+  const filters = parseAudienceFilters((key) => url.searchParams.get(key) ?? "");
   const cursor = url.searchParams.get("cursor") ?? undefined;
-  const customerWhere = { shop: session.shop, ...(orderedOnly ? { numberOfOrders: { gt: 0 } } : {}), ...(search ? { OR: [{firstName:{contains:search}},{lastName:{contains:search}},{email:{contains:search}},{phone:{contains:search}},{orders:{some:{orderName:{contains:search}}}}] } : {}) };
-  const [templates, customers, customerCount, orderCount, campaigns, syncJob] = await Promise.all([
+  const customerWhere = buildAudienceWhere(session.shop, filters);
+  const [templates, customers, customerCount, eligibleCount, orderCount, campaigns, syncJob] = await Promise.all([
     prisma.approvedWhatsAppTemplate.findMany({ where: { shop: session.shop }, orderBy: [{name:"asc"},{language:"asc"}] }),
     prisma.shopifyCustomerMirror.findMany({
       where: customerWhere,
@@ -218,15 +288,28 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       include: { orders: { orderBy: [{processedAt:"desc"},{createdAtShopify:"desc"}], take: 1 } },
     }),
     prisma.shopifyCustomerMirror.count({ where: customerWhere }),
+    prisma.shopifyCustomerMirror.count({ where: { ...customerWhere, whatsappOptIn: true } }),
     prisma.shopifyOrderMirror.count({ where: { shop: session.shop } }),
     prisma.whatsAppCampaign.findMany({ where: { shop: session.shop }, orderBy: { createdAt: "desc" }, take: 50, include: { recipients: { select: { status: true } } } }),
     prisma.shopifySyncJob.findUnique({ where: { id: session.shop } }),
   ]);
   return {
-    search, orderedOnly, nextCursor: customers.length === 50 ? customers[customers.length - 1]?.id ?? null : null, customerCount, templates: templates.map(t => ({id:t.id,name:t.name,language:t.language,category:t.category,components:t.components})),
+    filters,
+    search: filters.search,
+    orderedOnly: filters.orderedOnly,
+    nextCursor: customers.length === 50 ? customers[customers.length - 1]?.id ?? null : null,
+    customerCount,
+    eligibleCount,
+    templates: templates.map(t => ({id:t.id,name:t.name,language:t.language,category:t.category,components:t.components})),
     customers: customers.map(c => ({...c,tags:JSON.parse(c.tagsJson || "[]") as string[],latestOrder:c.orders[0]??null})),
     orderCount,
-    campaigns: campaigns.map(c => ({id:c.id,name:c.name,status:c.status,audienceCount:c.audienceCount,scheduledAt:c.scheduledAt,templateName:c.templateName,counts:c.recipients.reduce((acc,r)=>({...acc,[r.status]:(acc[r.status]??0)+1}),{} as Record<string,number>)})),
+    campaigns: campaigns.map(c => ({
+      id:c.id,name:c.name,status:c.status,audienceCount:c.audienceCount,scheduledAt:c.scheduledAt,
+      templateId:c.templateId,templateName:c.templateName,templateLanguage:c.templateLanguage,
+      templateComponents:c.templateComponents,variableMappingJson:c.variableMappingJson,
+      audienceCriteriaJson:c.audienceCriteriaJson,mediaUrl:c.mediaUrl,
+      counts:c.recipients.reduce((acc,r)=>({...acc,[r.status]:(acc[r.status]??0)+1}),{} as Record<string,number>)
+    })),
     syncJob,
   };
 };
@@ -235,6 +318,35 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const data = await request.formData();
   const intent = field(data, "intent");
+  if (intent === "resolve-image-file") {
+    const fileId = field(data, "fileId");
+    if (!/^gid:\/\/shopify\/MediaImage\/\d+$/.test(fileId)) {
+      return json({ error: "Choose an image from Shopify Files." }, 400);
+    }
+    try {
+      const response = await admin.graphql(
+        `#graphql
+          query BowchikaCampaignMediaImage($id: ID!) {
+            node(id: $id) {
+              ... on MediaImage { id alt image { url } }
+            }
+          }`,
+        { variables: { id: fileId }, signal: AbortSignal.timeout(15_000) },
+      );
+      const result = await response.json() as {
+        errors?: unknown[];
+        data?: { node?: { id?: string; alt?: string | null; image?: { url?: string } | null } | null };
+      };
+      const url = result.data?.node?.image?.url;
+      if (result.errors?.length || !url || !url.startsWith("https://")) {
+        return json({ error: "Shopify could not resolve this image. Choose another file." }, 400);
+      }
+      return json({ mediaUrl: url, mediaAlt: result.data?.node?.alt ?? "" });
+    } catch {
+      return json({ error: "Could not read the selected Shopify file. Try another image." }, 502);
+    }
+  }
+
   if (intent === "preview-csv" || intent === "import-csv") {
     const file = data.get("csvFile");
     if (!(file instanceof File) || !file.name.toLowerCase().endsWith(".csv")) {
@@ -681,9 +793,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const mediaUrlRaw = field(data,"mediaUrl");
     const selectedIds = [...new Set(data.getAll("customerId").map(String).filter(Boolean))].slice(0,10000);
     const selectAllMatching = field(data, "selectAllMatching") === "true";
-    const search = field(data, "audienceSearch").slice(0,120);
-    const orderedOnly = field(data, "orderedOnly") !== "false";
-    const where = { shop: session.shop, ...(orderedOnly ? { numberOfOrders: { gt: 0 } } : {}), ...(search ? { OR: [{firstName:{contains:search}},{lastName:{contains:search}},{email:{contains:search}},{phone:{contains:search}},{orders:{some:{orderName:{contains:search}}}}] } : {}) };
+    const filters = parseAudienceFilters((key) => {
+      const formKey: Record<string,string> = { search: "audienceSearch", orderedOnly: "orderedOnly" };
+      return field(data, formKey[key] ?? key);
+    });
+    const where = buildAudienceWhere(session.shop, filters);
     if (!selectAllMatching && !selectedIds.length) return json({error:"Select at least one customer."},400);
     const template = await prisma.approvedWhatsAppTemplate.findFirst({where:{id:templateId,shop:session.shop}});
     if (!template) return json({error:"Choose a synced approved WhatsApp template."},400);
@@ -701,10 +815,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const audienceWhere = selectAllMatching
       ? { ...where, whatsappOptIn: true }
       : { shop: session.shop, id: { in: selectedIds }, whatsappOptIn: true };
+    const audienceCriteria = {
+      ...filters,
+      selectAllMatching,
+      selectedCustomerIds: selectAllMatching ? [] : selectedIds,
+    };
     const campaign = await prisma.whatsAppCampaign.create({data:{
       shop:session.shop,name,templateId:template.id,templateName:template.name,
       templateLanguage:template.language,templateComponents:template.components,
-      variableMappingJson:JSON.stringify(mapping),mediaUrl,scheduledAt,status:"PREPARING",audienceCount:0,
+      variableMappingJson:JSON.stringify(mapping),audienceCriteriaJson:JSON.stringify(audienceCriteria),
+      mediaUrl,scheduledAt,status:"PREPARING",audienceCount:0,
     }});
     let recipientCount = 0;
     let afterId: string | undefined;
