@@ -248,19 +248,27 @@ const buildAudienceWhere = (shop: string, filters: {
     }
     and.push({ orders: { some: { AND: orderAnd } } });
   }
+  const minimumOrders = filters.orderedOnly
+    ? Math.max(1, filters.minOrders ?? 0)
+    : filters.minOrders;
+  const orderCountFilter = minimumOrders !== null || filters.maxOrders !== null
+    ? {
+        numberOfOrders: {
+          ...(minimumOrders !== null ? { gte: minimumOrders } : {}),
+          ...(filters.maxOrders !== null ? { lte: filters.maxOrders } : {}),
+        },
+      }
+    : {};
   return {
     shop,
-    ...(filters.orderedOnly ? { numberOfOrders: { gt: 0 } } : {}),
-    ...(filters.minOrders !== null || filters.maxOrders !== null
-      ? { numberOfOrders: { ...(filters.minOrders !== null ? { gte: filters.minOrders } : {}), ...(filters.maxOrders !== null ? { lte: filters.maxOrders } : {}) } }
-      : {}),
+    ...orderCountFilter,
     ...(filters.minSpend !== null ? { amountSpent: { gte: filters.minSpend } } : {}),
     ...(and.length ? { AND: and } : {}),
   };
 };
 
 const parseAudienceFilters = (read: (key: string) => string) => {
-  const positiveInteger = (raw: string) => raw && /^\\d+$/.test(raw) ? Number(raw) : null;
+  const positiveInteger = (raw: string) => raw && /^\d+$/.test(raw) ? Number(raw) : null;
   const nonNegativeAmount = (raw: string) => raw && Number.isFinite(Number(raw)) && Number(raw) >= 0 ? Number(raw) : null;
   const days = positiveInteger(read("lastOrderDays"));
   return {
@@ -814,7 +822,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       try { const url = new URL(mediaUrlRaw); if(url.protocol!=="https:") throw new Error(); mediaUrl=url.toString(); } catch { return json({error:"Media URL must be a valid HTTPS URL."},400); }
     }
     const mapping: Record<string,string> = {};
-    for (const [key,value] of data.entries()) { if (key.startsWith("map_")) mapping[key.slice(4)] = String(value).slice(0,100); else if (key.startsWith("custom_")) mapping["custom."+key.slice(7)] = String(value).slice(0,1024); }
+    for (const [key,value] of data.entries()) {
+      if (key.startsWith("map_")) mapping[key.slice(4)] = String(value).slice(0,100);
+      else if (key.startsWith("custom_")) mapping["custom."+key.slice(7)] = String(value).slice(0,1024);
+    }
+    let templateRequirements;
+    try {
+      templateRequirements = getWhatsAppTemplateRequirements(template.components);
+    } catch {
+      return json({error:"This approved template definition is invalid. Sync approved templates again."},400);
+    }
+    if (templateRequirements.unsupported) return json({error:templateRequirements.unsupported},400);
+    if (templateRequirements.header?.format === "IMAGE" && !mediaUrl) {
+      return json({error:"Choose a header image for this WhatsApp template."},400);
+    }
+    const requiredMappings = [
+      ...(templateRequirements.header?.format === "TEXT" ? templateRequirements.header.variables.map(v=>({section:"header",key:v.key})) : []),
+      ...templateRequirements.bodyVariables.map(v=>({section:"body",key:v.key})),
+      ...templateRequirements.buttons.flatMap(button=>button.variables.map(v=>({section:"button"+button.index,key:v.key}))),
+    ];
+    for (const item of requiredMappings) {
+      const path = mapping[item.section+"."+item.key] ?? "name";
+      const customValue = mapping["custom."+item.section+"."+item.key] ?? "";
+      if (path === "custom" && !customValue.trim()) {
+        return json({error:"Complete every custom template variable before saving this campaign."},400);
+      }
+    }
     const audienceWhere = selectAllMatching
       ? { ...where, whatsappOptIn: true }
       : { shop: session.shop, id: { in: selectedIds }, whatsappOptIn: true };
@@ -1099,7 +1132,7 @@ export default function CampaignCenter() {
       </select></label>
       <label>Purchased product<input name="productQuery" value={productQuery} onChange={e=>setProductQuery(e.target.value)} placeholder="Product title or Shopify product ID" style={{...inputStyle,marginTop:6}}/></label>
       <label>Purchased collection<input name="collectionQuery" value={collectionQuery} onChange={e=>setCollectionQuery(e.target.value)} placeholder="e.g. Valorant Armory" style={{...inputStyle,marginTop:6}}/></label>
-      <label style={{display:"flex",gap:8,alignItems:"center"}}><input type="checkbox" name="ordered" value="true" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label>
+      <label style={{display:"flex",gap:8,alignItems:"center"}}><input type="checkbox" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label>
       <input type="hidden" name="ordered" value={String(orderedOnly)}/>
       <div style={{display:"flex",gap:8,alignItems:"end"}}><button type="submit" style={{...style,background:"#155eef",color:"white"}}>Apply filters</button><a href="/app/campaigns" style={{...style,textDecoration:"none"}}>Clear filters</a></div>
       <div style={{gridColumn:"1 / -1",fontSize:12,color:"#667085"}}>Product and collection filters use synced Shopify line-item IDs, titles and collections. Orders available through Shopify's standard access or the historic CSV data are included where their line-item details support the selected filter.</div>
@@ -1108,7 +1141,7 @@ export default function CampaignCenter() {
       <input type="hidden" name="intent" value="create-campaign"/><input type="hidden" name="selectAllMatching" value={String(selectAllMatching)}/><input type="hidden" name="audienceSearch" value={query}/><input type="hidden" name="orderedOnly" value={String(orderedOnly)}/>
       <input type="hidden" name="minOrders" value={minOrders}/><input type="hidden" name="maxOrders" value={maxOrders}/><input type="hidden" name="minSpend" value={minSpend}/><input type="hidden" name="lastOrderDays" value={lastOrderDays}/><input type="hidden" name="productQuery" value={productQuery}/><input type="hidden" name="collectionQuery" value={collectionQuery}/>
       {selected.map(id=><input key={id} type="hidden" name="customerId" value={id}/>)}
-      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}><button type="button" style={style} onClick={()=>{setSelected(data.customers.map(c=>c.id));setSelectAllMatching(true)}}>Select all matching ({data.customerCount} customers)</button><span style={{fontSize:13,color:"#667085"}}>{data.eligibleCount} with Shopify WhatsApp opt-in</span><button type="button" style={style} onClick={()=>{setSelected([]);setSelectAllMatching(false)}}>Clear selection</button><strong>{selected.length} selected</strong></div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}><button type="button" style={style} onClick={()=>{setSelected(data.customers.map(c=>c.id));setSelectAllMatching(true)}}>Select all matching ({data.customerCount} customers)</button><span style={{fontSize:13,color:"#667085"}}>{data.eligibleCount} Shopify WhatsApp subscribers</span><button type="button" style={style} onClick={()=>{setSelected([]);setSelectAllMatching(false)}}>Clear selection</button><strong>{selected.length} selected</strong></div>
       {data.nextCursor && <div style={{display:"flex",justifyContent:"flex-end",marginBottom:10}}><a href={`?${nextPageParams.toString()}`} style={{...style,textDecoration:"none"}}>Next 50 customers →</a></div>}
       <div style={{overflowX:"auto",border:"1px solid #d0d5dd",borderRadius:8,marginBottom:20}}><table style={{borderCollapse:"collapse",width:"100%",minWidth:900}}><thead><tr>{["Select","Customer","Email","Phone","Orders","Latest order","WhatsApp consent"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.customers.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}><input type="checkbox" checked={selected.includes(c.id)} onChange={e=>{setSelectAllMatching(false);setSelected(old=>e.target.checked?[...new Set([...old,c.id])]:old.filter(id=>id!==c.id))}}/></td><td style={{padding:10}}>{[c.firstName,c.lastName].filter(Boolean).join(" ")||"Unnamed"}</td><td style={{padding:10}}>{c.email||"—"}</td><td style={{padding:10}}>{c.phone||"—"}</td><td style={{padding:10}}>{c.numberOfOrders}</td><td style={{padding:10}}>{c.latestOrder?.orderName||"—"}</td><td style={{padding:10}}><strong>{c.whatsappOptOutAt ? "Suppressed" : c.whatsappConsentState}</strong><div style={{fontSize:12,color:"#667085"}}>{c.whatsappConsentUpdatedAt ? new Date(c.whatsappConsentUpdatedAt).toLocaleDateString("en-IN") : "No Shopify consent record"}</div></td></tr>)}</tbody></table></div>
       <h2>Create campaign</h2><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
