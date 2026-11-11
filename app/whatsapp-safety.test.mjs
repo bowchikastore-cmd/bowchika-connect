@@ -134,7 +134,8 @@ try {
         },
       }),
     });
-    assert.equal(blocked.status, 503);
+    assert.equal(blocked.status, 200);
+    assert.equal((await blocked.json()).disabled, true);
     process.env.WHATSAPP_INBOX_SENDING_ENABLED = "false";
 
     const health = await campaignWorkerLoader({
