@@ -27,14 +27,14 @@ jobs:
 
       - name: Require Shopify app automation token
         env:
-          SHOPIFY_APP_AUTOMATION_TOKEN: ${{ secrets.SHOPIFY_APP_AUTOMATION_TOKEN }}
+          SHOPIFY_SERVICE_ACCOUNT_TOKEN: ${{ secrets.SHOPIFY_SERVICE_ACCOUNT_TOKEN }}
         run: |
-          if [ -z "$SHOPIFY_APP_AUTOMATION_TOKEN" ]; then
-            echo "::error::Add SHOPIFY_APP_AUTOMATION_TOKEN in GitHub repository Actions secrets. Create an app-scoped automation token for Bowchika Connect in Shopify Dev Dashboard."
+          if [ -z "$SHOPIFY_SERVICE_ACCOUNT_TOKEN" ]; then
+            echo "::error::Add SHOPIFY_SERVICE_ACCOUNT_TOKEN in GitHub repository Actions secrets. Create a Shopify service account with App development permission for Bowchika Connect in Shopify Dev Dashboard."
             exit 1
           fi
 
       - name: Release production app configuration
         env:
-          SHOPIFY_APP_AUTOMATION_TOKEN: ${{ secrets.SHOPIFY_APP_AUTOMATION_TOKEN }}
+          SHOPIFY_SERVICE_ACCOUNT_TOKEN: ${{ secrets.SHOPIFY_SERVICE_ACCOUNT_TOKEN }}
         run: npx --yes @shopify/cli@latest app deploy --config production --allow-updates --no-color
