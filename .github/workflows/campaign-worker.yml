@@ -1,0 +1,42 @@
+name: Bowchika campaign worker
+
+on:
+  schedule:
+    # Five-minute cadence, offset from the top of the hour to reduce queueing.
+    - cron: "2-57/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bowchika-campaign-worker
+  cancel-in-progress: false
+
+jobs:
+  run-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check worker secret
+        env:
+          CAMPAIGN_WORKER_SECRET: ${{ secrets.CAMPAIGN_WORKER_SECRET }}
+        run: |
+          if [ -z "$CAMPAIGN_WORKER_SECRET" ]; then
+            echo "::error::Add CAMPAIGN_WORKER_SECRET to GitHub Actions secrets and set the same value in the Render web service."
+            exit 1
+          fi
+
+      - name: Check out worker script
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run campaign worker
+        env:
+          CAMPAIGN_WORKER_URL: https://bowchika-connect.onrender.com/api/campaign-worker
+          CAMPAIGN_WORKER_SECRET: ${{ secrets.CAMPAIGN_WORKER_SECRET }}
+        run: node scripts/run-campaign-worker.mjs
