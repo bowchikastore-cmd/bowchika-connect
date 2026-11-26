@@ -10,7 +10,7 @@ name = "bowchika-connect"
 scopes = "read_customers,read_orders,read_all_orders,read_products,read_inventory,read_locations,read_files"
 
 [webhooks]
-api_version = "2027-01"
+api_version = "2026-10"
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/app/uninstalled"
