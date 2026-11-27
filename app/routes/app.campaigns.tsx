@@ -1206,7 +1206,7 @@ export function ErrorBoundary() {
       ? `${error.name}: ${error.message}`
       : String(error);
   const safeDetail = detail
-    .replace(/(token|secret|password)[=: ]+\\S+/gi, "$1=[redacted]")
+    .replace(/(token|secret|password)[=: ]+\S+/gi, "$1=[redacted]")
     .slice(0, 1200);
   console.error("Customer & Campaign Center route error", { status, detail: safeDetail });
 
