@@ -240,8 +240,8 @@ const buildAudienceWhere = (shop: string, filters: {
   }
   if (filters.productQuery || filters.collectionQuery || filters.lastOrderDays !== null) {
     const orderAnd: Record<string, unknown>[] = [];
-    if (filters.productQuery) orderAnd.push({ lineItemsJson: { contains: filters.productQuery, mode: "insensitive" } });
-    if (filters.collectionQuery) orderAnd.push({ lineItemsJson: { contains: filters.collectionQuery, mode: "insensitive" } });
+    if (filters.productQuery) orderAnd.push({ lineItemsSearch: { contains: filters.productQuery.toLowerCase() } });
+    if (filters.collectionQuery) orderAnd.push({ lineItemsSearch: { contains: filters.collectionQuery.toLowerCase() } });
     if (filters.lastOrderDays !== null) {
       orderAnd.push({ processedAt: { gte: new Date(Date.now() - filters.lastOrderDays * 86400000) } });
     }
@@ -459,6 +459,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         financialStatus: order.financialStatus,
         fulfillmentStatus: order.fulfillmentStatus,
         lineItemsJson: JSON.stringify(order.lineItems),
+        lineItemsSearch: JSON.stringify(order.lineItems).toLowerCase(),
         syncedAt: importedAt,
       };
       return prisma.shopifyOrderMirror.upsert({
@@ -720,6 +721,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             totalPrice: Number(order.totalPriceSet?.shopMoney?.amount ?? 0),
             currencyCode: order.totalPriceSet?.shopMoney?.currencyCode ?? "INR",
             lineItemsJson: JSON.stringify(order.lineItems?.nodes ?? []),
+            lineItemsSearch: JSON.stringify(order.lineItems?.nodes ?? []).toLowerCase(),
             syncedAt: now,
           };
           return prisma.shopifyOrderMirror.upsert({
@@ -1137,7 +1139,7 @@ export default function CampaignCenter() {
       <label style={{display:"flex",gap:8,alignItems:"center"}}><input type="checkbox" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label>
       <input type="hidden" name="ordered" value={String(orderedOnly)}/>
       <div style={{display:"flex",gap:8,alignItems:"end"}}><button type="submit" style={{...style,background:"#155eef",color:"white"}}>Apply filters</button><a href="/app/campaigns" style={{...style,textDecoration:"none"}}>Clear filters</a></div>
-      <div style={{gridColumn:"1 / -1",fontSize:12,color:"#667085"}}>Product and collection filters use synced Shopify line-item IDs, titles and collections. Orders available through Shopify&apos;s standard access or the historic CSV data are included where their line-item details support the selected filter.</div>
+      <div style={{gridColumn:"1 / -1",fontSize:12,color:"#667085"}}>Product and collection filters use synced Shopify line-item IDs, titles and collections. Partial matches ignore uppercase/lowercase. Orders available through Shopify&apos;s standard access or the historic CSV data are included where their line-item details support the selected filter.</div>
     </form>
     <fetcher.Form method="post" onSubmit={e=>{if(!window.confirm("Save a campaign for the selected audience? Only recipients with verified WhatsApp opt-in are eligible.")){e.preventDefault();return;}}}>
       <input type="hidden" name="intent" value="create-campaign"/><input type="hidden" name="selectAllMatching" value={String(selectAllMatching)}/><input type="hidden" name="audienceSearch" value={query}/><input type="hidden" name="orderedOnly" value={String(orderedOnly)}/>
