@@ -240,8 +240,8 @@ const buildAudienceWhere = (shop: string, filters: {
   }
   if (filters.productQuery || filters.collectionQuery || filters.lastOrderDays !== null) {
     const orderAnd: Record<string, unknown>[] = [];
-    if (filters.productQuery) orderAnd.push({ lineItemsJson: { contains: filters.productQuery } });
-    if (filters.collectionQuery) orderAnd.push({ lineItemsJson: { contains: filters.collectionQuery } });
+    if (filters.productQuery) orderAnd.push({ lineItemsJson: { contains: filters.productQuery, mode: "insensitive" } });
+    if (filters.collectionQuery) orderAnd.push({ lineItemsJson: { contains: filters.collectionQuery, mode: "insensitive" } });
     if (filters.lastOrderDays !== null) {
       orderAnd.push({ processedAt: { gte: new Date(Date.now() - filters.lastOrderDays * 86400000) } });
     }
@@ -1132,8 +1132,8 @@ export default function CampaignCenter() {
       <label>Last order<select name="lastOrderDays" value={lastOrderDays} onChange={e=>setLastOrderDays(e.target.value)} style={{...inputStyle,marginTop:6}}>
         <option value="">Any time</option><option value="30">Last 30 days</option><option value="60">Last 60 days</option><option value="90">Last 90 days</option><option value="180">Last 180 days</option><option value="365">Last 365 days</option>
       </select></label>
-      <label>Purchased product<input name="productQuery" value={productQuery} onChange={e=>setProductQuery(e.target.value)} placeholder="Product title or Shopify product ID" style={{...inputStyle,marginTop:6}}/></label>
-      <label>Purchased collection<input name="collectionQuery" value={collectionQuery} onChange={e=>setCollectionQuery(e.target.value)} placeholder="e.g. Valorant Armory" style={{...inputStyle,marginTop:6}}/></label>
+      <label>Purchased product<input name="productQuery" autoComplete="off" value={productQuery} onChange={e=>setProductQuery(e.target.value)} placeholder="Type part of a product title or ID" style={{...inputStyle,marginTop:6}}/></label>
+      <label>Purchased collection<input name="collectionQuery" autoComplete="off" value={collectionQuery} onChange={e=>setCollectionQuery(e.target.value)} placeholder="Type part of a collection title" style={{...inputStyle,marginTop:6}}/></label>
       <label style={{display:"flex",gap:8,alignItems:"center"}}><input type="checkbox" checked={orderedOnly} onChange={e=>setOrderedOnly(e.target.checked)}/> Customers who have ordered</label>
       <input type="hidden" name="ordered" value={String(orderedOnly)}/>
       <div style={{display:"flex",gap:8,alignItems:"end"}}><button type="submit" style={{...style,background:"#155eef",color:"white"}}>Apply filters</button><a href="/app/campaigns" style={{...style,textDecoration:"none"}}>Clear filters</a></div>
