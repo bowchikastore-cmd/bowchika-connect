@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
+import { isRouteErrorResponse, useFetcher, useLoaderData, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -1187,4 +1187,45 @@ export default function CampaignCenter() {
     <h2 style={{marginTop:32}}>Campaign delivery log</h2><div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse"}}><thead><tr>{["Campaign","Status","Audience","Schedule","Recipient states"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.campaigns.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}>{c.name}<div style={{fontSize:12,color:"#667085"}}>{c.templateName}</div></td><td style={{padding:10}}>{c.status}</td><td style={{padding:10}}>{c.audienceCount}</td><td style={{padding:10}}>{c.scheduledAt?new Date(c.scheduledAt).toLocaleString():"Immediate"}</td><td style={{padding:10}}>{Object.entries(c.counts).map(([k,v])=>k+": "+v).join(" · ")}<div style={{marginTop:6}}><button type="button" style={style} onClick={()=>reuseCampaign(c)}>Duplicate & reuse</button></div></td></tr>)}</tbody></table></div>
     <p style={{fontSize:12,color:"#667085",marginTop:20}}>Campaigns are persisted, but delivery is not enabled until the background worker is deployed and verified.</p>
   </div></s-page>;
+}
+
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+  const status = isRouteErrorResponse(error) ? error.status : 500;
+  const detail = isRouteErrorResponse(error)
+    ? [
+        error.statusText,
+        typeof error.data === "string"
+          ? error.data
+          : error.data && typeof error.data === "object" && "message" in error.data
+            ? String(error.data.message)
+            : JSON.stringify(error.data ?? {}),
+      ].filter(Boolean).join(": ")
+    : error instanceof Error
+      ? `${error.name}: ${error.message}`
+      : String(error);
+  const safeDetail = detail
+    .replace(/(token|secret|password)[=: ]+\S+/gi, "$1=[redacted]")
+    .slice(0, 1200);
+  console.error("Customer & Campaign Center route error", { status, detail: safeDetail });
+
+  return (
+    <s-page heading="Customer &amp; Campaign Center">
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: 24 }}>
+        <h2>Customer &amp; Campaign Center could not load</h2>
+        <p>Request status: {status}</p>
+        <pre style={{
+          whiteSpace: "pre-wrap",
+          overflowWrap: "anywhere",
+          background: "#fff4f4",
+          border: "1px solid #f0b4b4",
+          borderRadius: 8,
+          padding: 14,
+          color: "#7a271a",
+        }}>{safeDetail || "No additional error details were provided."}</pre>
+        <p>Your synced customer and order records have not been deleted by this page error.</p>
+      </div>
+    </s-page>
+  );
 }
