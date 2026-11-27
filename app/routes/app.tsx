@@ -7,8 +7,6 @@ import { authenticate } from "../shopify.server";
 import { ThemeProvider } from "../theme-provider";
 import styles from "../app.css?url";
 
-const workspaceLinkProps = { href: "/app", rel: "home" as const };
-
 export const links: LinksFunction = () => [{ rel: "stylesheet", href: styles }];
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
