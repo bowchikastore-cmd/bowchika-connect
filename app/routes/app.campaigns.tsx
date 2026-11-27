@@ -8,6 +8,7 @@ import { normalizeE164Phone, getWhatsAppTemplateRequirements } from "../whatsapp
 import { getWhatsAppBusinessAccountId, getWhatsAppConfig, WhatsAppConfigurationError } from "../whatsapp.server";
 import { parseShopifyOrderCsv } from "../shopify-order-csv.server";
 import { buildUpdatedAtSearchQuery, getIncrementalSyncSince } from "../shopify-sync.shared";
+import { getCampaignStatus } from "../campaign-draft-policy";
 
 const json = (body: object, status = 200) => Response.json(body, { status });
 const field = (data: FormData, key: string) => String(data.get(key) ?? "").trim();
@@ -999,17 +1000,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       await prisma.whatsAppCampaign.update({where:{id:campaign.id},data:{status:"FAILED"}});
       return json({error:"Campaign audience preparation failed. The campaign was not queued for sending; review the local customer data and retry."},500);
     }
-    if (!recipientCount) {
-      await prisma.whatsAppCampaign.update({
-        where: { id: campaign.id },
-        data: { status: "DRAFT", scheduledAt: null },
-      });
+    const finalStatus = getCampaignStatus(recipientCount, scheduledAt);
+    await prisma.whatsAppCampaign.update({
+      where: { id: campaign.id },
+      data: { status: finalStatus, ...(finalStatus === "DRAFT" ? { scheduledAt: null } : {}) },
+    });
+    if (finalStatus === "DRAFT") {
       return json({
         success: "Draft saved successfully. No contacts were queued because no selected customers currently meet WhatsApp sending requirements. Nothing was sent.",
         campaignId: campaign.id,
       });
     }
-    const finalStatus = scheduledAt ? "SCHEDULED" : "QUEUED";
     await prisma.whatsAppCampaign.update({where:{id:campaign.id},data:{status:finalStatus}});
     return json({success:`Campaign saved for ${recipientCount} opted-in customers. ${scheduledAt ? "Scheduled for "+scheduledAt.toLocaleString("en-IN") : "Queued for sending"}. Sending worker must be active before any message is sent.`,campaignId:campaign.id});
   }
