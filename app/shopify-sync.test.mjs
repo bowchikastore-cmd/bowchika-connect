@@ -115,7 +115,26 @@ try {
       orderNumber: 1,
       totalPrice: 100,
       currencyCode: "INR",
-      lineItemsJson: JSON.stringify([{ name: "Sync test product", quantity: 1 }]),
+      lineItemsJson: JSON.stringify([{
+        name: "Valorant Raze Tee",
+        quantity: 1,
+        product: {
+          id: "gid://shopify/Product/1001",
+          title: "Valorant Raze Tee",
+          productType: "T-Shirt",
+          collections: { nodes: [{ id: "gid://shopify/Collection/2001", title: "Valorant Armory" }] },
+        },
+      }]),
+      lineItemsSearch: JSON.stringify([{
+        name: "Valorant Raze Tee",
+        quantity: 1,
+        product: {
+          id: "gid://shopify/Product/1001",
+          title: "Valorant Raze Tee",
+          productType: "T-Shirt",
+          collections: { nodes: [{ id: "gid://shopify/Collection/2001", title: "Valorant Armory" }] },
+        },
+      }]).toLowerCase(),
       syncedAt: new Date(),
     };
     await prisma.shopifyOrderMirror.upsert({
@@ -132,6 +151,14 @@ try {
       await prisma.shopifyOrderMirror.count({ where: { shop, id: orderId } }),
       1,
     );
+    const collectionMatches = await prisma.shopifyOrderMirror.count({
+      where: { shop, id: orderId, lineItemsSearch: { contains: "VALORANT ARMORY".toLowerCase() } },
+    });
+    const productMatches = await prisma.shopifyOrderMirror.count({
+      where: { shop, id: orderId, lineItemsSearch: { contains: "RAZE TEE".toLowerCase() } },
+    });
+    assert.equal(collectionMatches, 1, "collection matching should ignore letter case");
+    assert.equal(productMatches, 1, "product matching should ignore letter case");
 
     await prisma.shopifySyncJob.update({
       where: { id: shop },
