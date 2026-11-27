@@ -5,8 +5,10 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { normalizeE164Phone, getWhatsAppTemplateRequirements } from "../whatsapp-shared";
+import { getWhatsAppBusinessAccountId, getWhatsAppConfig, WhatsAppConfigurationError } from "../whatsapp.server";
 import { parseShopifyOrderCsv } from "../shopify-order-csv.server";
 import { buildUpdatedAtSearchQuery, getIncrementalSyncSince } from "../shopify-sync.shared";
+import { getCampaignStatus } from "../campaign-draft-policy";
 
 const json = (body: object, status = 200) => Response.json(body, { status });
 const field = (data: FormData, key: string) => String(data.get(key) ?? "").trim();
@@ -37,6 +39,7 @@ type CampaignActionData = {
     matchedNewOrders: number;
     unmatchedNewOrders: number;
   };
+  templateCount?: number;
   importStats?: {
     importedOrders: number;
     duplicateOrders: number;
@@ -328,6 +331,82 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const data = await request.formData();
   const intent = field(data, "intent");
+  if (intent === "sync-whatsapp-templates") {
+    try {
+      const config = getWhatsAppConfig();
+      const businessAccountId = getWhatsAppBusinessAccountId();
+      if (!businessAccountId) {
+        throw new WhatsAppConfigurationError("WhatsApp Business Account ID is not configured on the server.");
+      }
+
+      type MetaTemplateItem = {
+        id: string;
+        name: string;
+        language: string;
+        category: string;
+        status: string;
+        components?: unknown[];
+      };
+      type MetaTemplatePage = {
+        data?: MetaTemplateItem[];
+        paging?: { cursors?: { after?: string } };
+        error?: { code?: number };
+      };
+
+      const templates: MetaTemplateItem[] = [];
+      let after: string | undefined;
+      let previousCursor: string | undefined;
+      let pageCount = 0;
+      do {
+        const endpoint = new URL(`https://graph.facebook.com/${config.apiVersion}/${encodeURIComponent(businessAccountId)}/message_templates`);
+        endpoint.searchParams.set("fields", "id,name,language,category,status,components");
+        endpoint.searchParams.set("limit", "100");
+        if (after) endpoint.searchParams.set("after", after);
+        const response = await fetch(endpoint, {
+          headers: { Authorization: `Bearer ${config.accessToken}` },
+          cache: "no-store",
+          signal: AbortSignal.timeout(20_000),
+        });
+        const result = await response.json().catch(() => null) as MetaTemplatePage | null;
+        if (!response.ok || !Array.isArray(result?.data)) {
+          const code = result?.error?.code;
+          if (code === 190) throw new Error("Meta rejected the access token. Check the WhatsApp access token in Render.");
+          if (code === 10 || code === 200) throw new Error("Meta denied template access. Check WhatsApp Business permissions.");
+          throw new Error(`Meta template sync failed (HTTP ${response.status}).`);
+        }
+        templates.push(...result.data.filter((template) => template.status === "APPROVED"));
+        previousCursor = after;
+        after = result.paging?.cursors?.after;
+        pageCount += 1;
+      } while (after && after !== previousCursor && pageCount < 50);
+
+      const syncedAt = new Date();
+      await prisma.$transaction(async (transaction) => {
+        await transaction.approvedWhatsAppTemplate.deleteMany({ where: { shop: session.shop } });
+        if (templates.length) {
+          await transaction.approvedWhatsAppTemplate.createMany({
+            data: templates.map((template) => ({
+              shop: session.shop,
+              metaTemplateId: template.id,
+              name: template.name,
+              language: template.language,
+              category: template.category,
+              components: JSON.stringify(template.components ?? []),
+              syncedAt,
+            })),
+          });
+        }
+      });
+      return json({
+        success: `Synced ${templates.length} approved WhatsApp template${templates.length === 1 ? "" : "s"}.`,
+        templateCount: templates.length,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "WhatsApp templates could not be synced.";
+      return json({ error: message }, 400);
+    }
+  }
+
   if (intent === "resolve-image-file") {
     const fileId = field(data, "fileId");
     if (!/^gid:\/\/shopify\/MediaImage\/\d+$/.test(fileId)) {
@@ -921,11 +1000,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       await prisma.whatsAppCampaign.update({where:{id:campaign.id},data:{status:"FAILED"}});
       return json({error:"Campaign audience preparation failed. The campaign was not queued for sending; review the local customer data and retry."},500);
     }
-    if (!recipientCount) {
-      await prisma.whatsAppCampaign.delete({where:{id:campaign.id}});
-      return json({error:"No matching customer has both a valid phone number and verified WhatsApp opt-in recorded in Bowchika Connect. No campaign was queued."},400);
+    const finalStatus = getCampaignStatus(recipientCount, scheduledAt);
+    await prisma.whatsAppCampaign.update({
+      where: { id: campaign.id },
+      data: { status: finalStatus, ...(finalStatus === "DRAFT" ? { scheduledAt: null } : {}) },
+    });
+    if (finalStatus === "DRAFT") {
+      return json({
+        success: "Draft saved successfully. No contacts were queued because no selected customers currently meet WhatsApp sending requirements. Nothing was sent.",
+        campaignId: campaign.id,
+      });
     }
-    const finalStatus = scheduledAt ? "SCHEDULED" : "QUEUED";
     await prisma.whatsAppCampaign.update({where:{id:campaign.id},data:{status:finalStatus}});
     return json({success:`Campaign saved for ${recipientCount} opted-in customers. ${scheduledAt ? "Scheduled for "+scheduledAt.toLocaleString("en-IN") : "Queued for sending"}. Sending worker must be active before any message is sent.`,campaignId:campaign.id});
   }
@@ -939,6 +1024,7 @@ export default function CampaignCenter() {
   const autoSyncContinuation = useRef<string | null>(null);
   const importFetcher = useFetcher<CampaignActionData>();
   const imageFetcher = useFetcher<CampaignActionData>();
+  const templateSyncFetcher = useFetcher<CampaignActionData>();
   const shopify = useAppBridge() as unknown as { intents: { invoke: (intent: string, options?: unknown) => Promise<{ complete: Promise<{ code: string; data?: { ids?: string[] }; message?: string }> }> } };
   const [csvFileKey, setCsvFileKey] = useState("");
   const [query,setQuery] = useState(data.search);
@@ -1091,9 +1177,9 @@ export default function CampaignCenter() {
   });
   if (data.nextCursor) nextPageParams.set("cursor", data.nextCursor);
 
-  return <s-page heading="Customer & Campaign Center"><div style={{maxWidth:1400,margin:"0 auto",padding:20,color:"var(--bc-text, #222)"}}>
-    <h1>Shopify customers → WhatsApp campaigns</h1>
-    <p>Synced customer and order records, full-store search, bulk selection, approved template mapping and scheduled campaign drafts.</p>
+  return <s-page heading="Campaign Manager"><div style={{maxWidth:1400,margin:"0 auto",padding:20,color:"var(--bc-text, #222)"}}>
+    <h1>Campaign Manager</h1>
+    <p>Build campaigns from your Shopify audience, choose an approved WhatsApp template, preview the message and save a draft or queue eligible recipients.</p>
     <syncFetcher.Form method="post" onSubmit={() => { autoSyncContinuation.current = null; }} style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
       <button name="intent" value="sync" style={style} disabled={syncFetcher.state!=="idle"}>
         {data.syncJob?.status === "RUNNING" ? "Resume current sync" : "Run full sync (all accessible records)"}
@@ -1141,14 +1227,26 @@ export default function CampaignCenter() {
       <div style={{display:"flex",gap:8,alignItems:"end"}}><button type="submit" style={{...style,background:"#155eef",color:"white"}}>Apply filters</button><a href="/app/campaigns" style={{...style,textDecoration:"none"}}>Clear filters</a></div>
       <div style={{gridColumn:"1 / -1",fontSize:12,color:"#667085"}}>Product and collection filters use synced Shopify line-item IDs, titles and collections. Partial matches ignore uppercase/lowercase. Orders available through Shopify&apos;s standard access or the historic CSV data are included where their line-item details support the selected filter.</div>
     </form>
-    <fetcher.Form method="post" onSubmit={e=>{if(!window.confirm("Save a campaign for the selected audience? Only recipients with verified WhatsApp opt-in are eligible.")){e.preventDefault();return;}}}>
+    <h2>Campaign setup</h2>
+<div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginBottom:12}}>
+  <templateSyncFetcher.Form method="post">
+    <input type="hidden" name="intent" value="sync-whatsapp-templates"/>
+    <button type="submit" style={style} disabled={templateSyncFetcher.state!=="idle"}>{templateSyncFetcher.state==="idle" ? "Sync approved templates" : "Syncing templates…"}</button>
+  </templateSyncFetcher.Form>
+  <span style={{fontSize:12,color:"#667085"}}>{data.templates.length} approved templates available</span>
+</div>
+{templateSyncFetcher.data?.success && <><p role="status" style={{color:"#067647"}}>{templateSyncFetcher.data.success}</p><p style={{fontSize:12}}><a href="/app/campaigns">Reload Campaign Manager to use the synced templates →</a></p></>}
+{templateSyncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{templateSyncFetcher.data.error}</p>}
+<p style={{fontSize:12,color:"#667085"}}>Campaign drafts can be saved even when no contacts are currently eligible. Only contacts with a valid recorded WhatsApp opt-in and no opt-out are placed in the send queue.</p>
+<fetcher.Form method="post" onSubmit={e=>{if(!window.confirm("Save this campaign? Only contacts with recorded WhatsApp opt-in and no opt-out can be queued. If none qualify, the campaign is saved as a draft and nothing is sent.")){e.preventDefault();return;}}}>
       <input type="hidden" name="intent" value="create-campaign"/><input type="hidden" name="selectAllMatching" value={String(selectAllMatching)}/><input type="hidden" name="audienceSearch" value={query}/><input type="hidden" name="orderedOnly" value={String(orderedOnly)}/>
       <input type="hidden" name="minOrders" value={minOrders}/><input type="hidden" name="maxOrders" value={maxOrders}/><input type="hidden" name="minSpend" value={minSpend}/><input type="hidden" name="lastOrderDays" value={lastOrderDays}/><input type="hidden" name="productQuery" value={productQuery}/><input type="hidden" name="collectionQuery" value={collectionQuery}/>
       {selected.map(id=><input key={id} type="hidden" name="customerId" value={id}/>)}
-      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}><button type="button" style={style} onClick={()=>{setSelected(data.customers.map(c=>c.id));setSelectAllMatching(true)}}>Select all matching ({data.customerCount} customers)</button><span style={{fontSize:13,color:"#667085"}}>{data.eligibleCount} Shopify WhatsApp subscribers</span><button type="button" style={style} onClick={()=>{setSelected([]);setSelectAllMatching(false)}}>Clear selection</button><strong>{selected.length} selected</strong></div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}><button type="button" style={style} onClick={()=>{setSelected(data.customers.map(c=>c.id));setSelectAllMatching(true)}}>Select all matching ({data.customerCount} customers)</button><span style={{fontSize:13,color:"#667085"}}>{data.eligibleCount} currently eligible WhatsApp recipients</span><button type="button" style={style} onClick={()=>{setSelected([]);setSelectAllMatching(false)}}>Clear selection</button><strong>{selected.length} selected</strong></div>
       {data.nextCursor && <div style={{display:"flex",justifyContent:"flex-end",marginBottom:10}}><a href={`?${nextPageParams.toString()}`} style={{...style,textDecoration:"none"}}>Next 50 customers →</a></div>}
       <div style={{overflowX:"auto",border:"1px solid #d0d5dd",borderRadius:8,marginBottom:20}}><table style={{borderCollapse:"collapse",width:"100%",minWidth:900}}><thead><tr>{["Select","Customer","Email","Phone","Orders","Latest order","WhatsApp consent"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.customers.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}><input type="checkbox" checked={selected.includes(c.id)} onChange={e=>{setSelectAllMatching(false);setSelected(old=>e.target.checked?[...new Set([...old,c.id])]:old.filter(id=>id!==c.id))}}/></td><td style={{padding:10}}>{[c.firstName,c.lastName].filter(Boolean).join(" ")||"Unnamed"}</td><td style={{padding:10}}>{c.email||"—"}</td><td style={{padding:10}}>{c.phone||"—"}</td><td style={{padding:10}}>{c.numberOfOrders}</td><td style={{padding:10}}>{c.latestOrder?.orderName||"—"}</td><td style={{padding:10}}><strong>{c.whatsappOptOutAt ? "Suppressed" : c.whatsappConsentState}</strong><div style={{fontSize:12,color:"#667085"}}>{c.whatsappConsentUpdatedAt ? new Date(c.whatsappConsentUpdatedAt).toLocaleDateString("en-IN") : "No Shopify consent record"}</div></td></tr>)}</tbody></table></div>
-      <h2>Create campaign</h2><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
+      
+<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
       <label>Campaign name<input name="name" value={name} onChange={e=>setName(e.target.value)} style={{...style,width:"100%",marginTop:6}}/></label>
       <label>Approved template<select name="templateId" value={chosenTemplate} onChange={e=>{setChosenTemplate(e.target.value);setVariableMapping({});setCustomMapping({});}} style={{...style,width:"100%",marginTop:6}}>{data.templates.map(t=><option key={t.id} value={t.id}>{t.name} · {t.language}</option>)}</select></label>
       <label>Schedule (blank = queue now)<input type="datetime-local" name="scheduledAt" value={scheduledAt} onChange={e=>setScheduledAt(e.target.value)} style={{...style,width:"100%",marginTop:6}}/></label>
@@ -1182,10 +1280,10 @@ export default function CampaignCenter() {
           </aside>
         </div>
       </div>}
-      <button style={{...style,marginTop:16,background:"#155eef",color:"white"}} disabled={(!selectAllMatching&&!selected.length)||!template||Boolean(requirements?.unsupported)||fetcher.state!=="idle"}>Save / schedule campaign</button>
+      <button style={{...style,marginTop:16,background:"#155eef",color:"white"}} disabled={(!selectAllMatching&&!selected.length)||!template||Boolean(requirements?.unsupported)||fetcher.state!=="idle"}>Save draft / queue eligible recipients</button>
     </fetcher.Form>
-    <h2 style={{marginTop:32}}>Campaign delivery log</h2><div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse"}}><thead><tr>{["Campaign","Status","Audience","Schedule","Recipient states"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.campaigns.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}>{c.name}<div style={{fontSize:12,color:"#667085"}}>{c.templateName}</div></td><td style={{padding:10}}>{c.status}</td><td style={{padding:10}}>{c.audienceCount}</td><td style={{padding:10}}>{c.scheduledAt?new Date(c.scheduledAt).toLocaleString():"Immediate"}</td><td style={{padding:10}}>{Object.entries(c.counts).map(([k,v])=>k+": "+v).join(" · ")}<div style={{marginTop:6}}><button type="button" style={style} onClick={()=>reuseCampaign(c)}>Duplicate & reuse</button></div></td></tr>)}</tbody></table></div>
-    <p style={{fontSize:12,color:"#667085",marginTop:20}}>Campaigns are persisted, but delivery is not enabled until the background worker is deployed and verified.</p>
+    <h2 style={{marginTop:32}}>Campaigns &amp; drafts</h2><div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse"}}><thead><tr>{["Campaign","Status","Audience","Schedule","Recipient states"].map(x=><th key={x} style={{padding:10,textAlign:"left",background:"#f2f4f7"}}>{x}</th>)}</tr></thead><tbody>{data.campaigns.map(c=><tr key={c.id} style={{borderTop:"1px solid #eaecf0"}}><td style={{padding:10}}>{c.name}<div style={{fontSize:12,color:"#667085"}}>{c.templateName}</div></td><td style={{padding:10}}>{c.status}</td><td style={{padding:10}}>{c.audienceCount}</td><td style={{padding:10}}>{c.status === "DRAFT" ? "Draft — not scheduled" : c.scheduledAt?new Date(c.scheduledAt).toLocaleString():"Immediate"}</td><td style={{padding:10}}>{Object.entries(c.counts).map(([k,v])=>k+": "+v).join(" · ")}<div style={{marginTop:6}}><button type="button" style={style} onClick={()=>reuseCampaign(c)}>Duplicate & reuse</button></div></td></tr>)}</tbody></table></div>
+    <p style={{fontSize:12,color:"#667085",marginTop:20}}>Drafts are saved without queuing recipients. Campaign delivery remains disabled until sending is explicitly enabled and the worker is verified.</p>
   </div></s-page>;
 }
 
@@ -1213,7 +1311,7 @@ export function ErrorBoundary() {
   return (
     <s-page heading="Customer &amp; Campaign Center">
       <div style={{ maxWidth: 900, margin: "0 auto", padding: 24 }}>
-        <h2>Customer &amp; Campaign Center could not load</h2>
+        <h2>Campaign Manager could not load</h2>
         <p>Request status: {status}</p>
         <pre style={{
           whiteSpace: "pre-wrap",
