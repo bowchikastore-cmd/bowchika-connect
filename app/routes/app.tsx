@@ -66,8 +66,8 @@ export function ErrorBoundary() {
       ? `${error.name}: ${error.message}`
       : String(error);
   const safeDetails = details
-    .replace(/(?:postgres|postgresql|mysql):\\/\\/[^\\s"'\x60]+/gi, "[database URL redacted]")
-    .replace(/(token|secret|password)[=: ]+\\S+/gi, "$1=[redacted]")
+    .replace(/\b(?:postgres|postgresql|mysql):\/\/\S+/gi, "[database URL redacted]")
+    .replace(/\b(token|secret|password)[=: ]+\S+/gi, "$1=[redacted]")
     .slice(0, 1600);
 
   console.error("Bowchika Connect root route error", { status, details: safeDetails });
