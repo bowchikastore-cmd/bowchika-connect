@@ -121,6 +121,7 @@ model ShopifyOrderMirror {
   financialStatus String?
   fulfillmentStatus String?
   lineItemsJson String @default("[]")
+  lineItemsSearch String @default("")
   syncedAt DateTime @default(now())
   customer ShopifyCustomerMirror? @relation(fields: [shop, customerId], references: [shop, id], onDelete: Cascade)
   @@unique([shop, id])
