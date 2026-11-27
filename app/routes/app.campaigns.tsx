@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { isRouteErrorResponse, useFetcher, useLoaderData, useRevalidator, useRouteError } from "react-router";
+import { isRouteErrorResponse, useFetcher, useLoaderData, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -1024,7 +1024,6 @@ export default function CampaignCenter() {
   const importFetcher = useFetcher<CampaignActionData>();
   const imageFetcher = useFetcher<CampaignActionData>();
   const templateSyncFetcher = useFetcher<CampaignActionData>();
-  const revalidator = useRevalidator();
   const shopify = useAppBridge() as unknown as { intents: { invoke: (intent: string, options?: unknown) => Promise<{ complete: Promise<{ code: string; data?: { ids?: string[] }; message?: string }> }> } };
   const [csvFileKey, setCsvFileKey] = useState("");
   const [query,setQuery] = useState(data.search);
@@ -1148,11 +1147,6 @@ export default function CampaignCenter() {
     }
   };
 
-  useEffect(() => {
-    if (templateSyncFetcher.state === "idle" && templateSyncFetcher.data?.templateCount !== undefined) {
-      revalidator.revalidate();
-    }
-  }, [templateSyncFetcher.state, templateSyncFetcher.data, revalidator]);
   const syncState = syncFetcher.state;
   const syncData = syncFetcher.data;
   const submitSync = syncFetcher.submit;
@@ -1247,7 +1241,7 @@ export default function CampaignCenter() {
   </templateSyncFetcher.Form>
   <span style={{fontSize:12,color:"#667085"}}>{data.templates.length} approved templates available</span>
 </div>
-{templateSyncFetcher.data?.success && <p role="status" style={{color:"#067647"}}>{templateSyncFetcher.data.success}</p>}
+{templateSyncFetcher.data?.success && <p role="status" style={{color:"#067647"}}>{templateSyncFetcher.data.success}</p><p style={{fontSize:12}}><a href="/app/campaigns">Reload Campaign Manager to use the synced templates →</a></p>}
 {templateSyncFetcher.data?.error && <p role="alert" style={{color:"#b42318"}}>{templateSyncFetcher.data.error}</p>}
 <p style={{fontSize:12,color:"#667085"}}>Campaign drafts can be saved even when no contacts are currently eligible. Only contacts with a valid recorded WhatsApp opt-in and no opt-out are placed in the send queue.</p>
 <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
