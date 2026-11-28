@@ -7,6 +7,8 @@ import { authenticate } from "../shopify.server";
 import { ThemeProvider } from "../theme-provider";
 import styles from "../app.css?url";
 
+const workspaceLinkProps = { href: "/app", rel: "home" as const };
+
 export const links: LinksFunction = () => [{ rel: "stylesheet", href: styles }];
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -28,15 +30,18 @@ export default function App() {
               <img src="/bowchika-mark.svg" alt="" />
               <span>
                 <span className="bc-brand-name">Bowchika Connect</span>
-                <span className="bc-brand-tagline">WhatsApp campaigns &amp; customer inbox</span>
+                <span className="bc-brand-tagline">Customer conversations. Made simpler.</span>
               </span>
             </Link>
           </header>
           <s-app-nav>
-            <s-link href="/app/campaigns">Campaigns</s-link>
+            <s-link {...workspaceLinkProps}>Workspace</s-link>
+            <s-link href="/app/campaigns">Customers &amp; Campaigns</s-link>
             <s-link href="/app/inbox">Inbox</s-link>
+            <s-link href="/app/settings">Settings</s-link>
           </s-app-nav>
           <main className="bc-main"><Outlet /></main>
+          <footer className="bc-footer">Made by Rudraksh, with GPT &amp; a questionable amount of coffee ☕❤️</footer>
         </div>
       </ThemeProvider>
     </AppProvider>
