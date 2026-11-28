@@ -48,8 +48,7 @@ export default function App() {
   );
 }
 
-// Keep Shopify's response handling intact. In particular, redirect Responses
-// must not be rendered as ordinary route errors by a custom diagnostic page.
+// Preserve Shopify response and redirect handling for the embedded app.
 export function ErrorBoundary() {
   return boundary.error(useRouteError());
 }
