@@ -4,7 +4,7 @@
 **Owner:** Carepill Global Private Limited / Bowchika  
 **Type:** Shopify-embedded WhatsApp operations workspace  
 **Primary users:** Bowchika store operators and customer-support staff  
-**Product shape:** Two primary screens — Campaigns and Inbox
+**Product shape:** Full workspace with Overview, Customer & Campaign Center, Inbox and Settings
 
 ## 1. Product purpose
 
@@ -15,7 +15,7 @@ The intended operator experience is deliberately small:
 1. **Campaigns** — find an audience, build a template message, preview it, save a draft or schedule eligible recipients, and review campaign status.
 2. **Inbox** — view conversations, read inbound messages, and reply using an eligible text reply or an approved template.
 
-The old multi-tab workspace dashboard and appearance-only Settings screen are retired from the primary experience. The app opens directly at Campaigns. Internal configuration, authentication, webhooks, database and worker routes remain part of the application even though they are not visible as navigation items.
+The application retains its full workspace dashboard, Customer & Campaign Center, Inbox and Settings navigation. Supporting authentication, webhook, database and worker routes remain part of the application.
 
 ## 2. Primary screens
 
@@ -153,4 +153,4 @@ Keep the operator experience focused on two destinations:
 - **Campaigns:** one direct campaign workflow — audience → approved template → variable mapping → preview → draft/schedule → delivery status.
 - **Inbox:** one direct conversation workflow — conversation list → message history → reply.
 
-Avoid reintroducing a separate overview dashboard, customer-segment centre or appearance settings page into the main navigation unless there is a clear operational need. Keep advanced data sync and CSV import as supporting sections inside Campaigns rather than separate app destinations.
+Retain the established full workspace, Customer & Campaign Center, Inbox and Settings pages. Keep sync and CSV import inside the Customer & Campaign Center as before.
