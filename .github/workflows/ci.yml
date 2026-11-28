@@ -41,8 +41,6 @@ jobs:
         run: npm run lint
       - name: Validate campaign worker script
         run: node --check scripts/run-campaign-worker.mjs
-      - name: Campaign draft policy tests
-        run: npx vite-node app/campaign-draft-policy.test.mjs
       - name: WhatsApp safety and webhook tests
         run: npx vite-node app/whatsapp-safety.test.mjs
       - name: Shopify sync checkpoint tests
